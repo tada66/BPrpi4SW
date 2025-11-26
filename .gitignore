@@ -1,0 +1,4 @@
+deploy.ps1
+/.vscode
+/src/obj
+/src/bin

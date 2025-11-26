@@ -1,0 +1,4 @@
+C:\Users\tadeas\BPrpi4SW\bin\Release\net10.0\linux-arm\publish\BPrpi4SW
+C:\Users\tadeas\BPrpi4SW\bin\Release\net10.0\linux-arm\publish\BPrpi4SW.dll
+C:\Users\tadeas\BPrpi4SW\bin\Release\net10.0\linux-arm\publish\BPrpi4SW.deps.json
+C:\Users\tadeas\BPrpi4SW\bin\Release\net10.0\linux-arm\publish\BPrpi4SW.runtimeconfig.json
