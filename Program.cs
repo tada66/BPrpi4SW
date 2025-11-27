@@ -1,6 +1,7 @@
 ﻿// See https://aka.ms/new-console-template for more information
 using System;
 using System.Linq;
+using System.Net;
 
 class Program
 {
@@ -37,18 +38,21 @@ class Program
             Console.WriteLine($"Selecting: {selected.Model}");
             
             cam.ConnectCamera(selected.Port);
-            cam.Iso.value = 1600;
+            cam.Iso.value = 3200;
             Console.WriteLine("ISO set to: " + cam.Iso.value);
             Console.WriteLine("ISO index: " + cam.Iso.index);
             cam.shutterSpeed.value = "1/60";
             Console.WriteLine("Shutter Speed set to: " + cam.shutterSpeed.value);
             Console.WriteLine("Shutter Speed index: " + cam.shutterSpeed.index);
-            cam.aperture.value = "2";
+            cam.aperture.value = "2.8";
             Console.WriteLine("Aperture set to: " + cam.aperture.value);
             Console.WriteLine("Aperture index: " + cam.aperture.index);
-            Console.WriteLine("Supported ISO values: " + string.Join(", ", cam.Iso.Values));
-            Console.WriteLine("Supported Shutter Speed values: " + string.Join(", ", cam.shutterSpeed.Values));
-            Console.WriteLine("Supported Aperture values: " + string.Join(", ", cam.aperture.Values));
+            //Console.WriteLine("Supported ISO values: " + string.Join(", ", cam.Iso.Values));
+            //Console.WriteLine("Supported Shutter Speed values: " + string.Join(", ", cam.shutterSpeed.Values));
+            //Console.WriteLine("Supported Aperture values: " + string.Join(", ", cam.aperture.Values));
+
+
+            Console.WriteLine(cam.GetLiveViewBytes());
         }
         catch (Exception ex)
         {

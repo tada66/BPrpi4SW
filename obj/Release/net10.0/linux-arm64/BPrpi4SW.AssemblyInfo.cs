@@ -13,7 +13,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("BPrpi4SW")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Release")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+2b0913dfc2d0ef5927251d999d8712683992257e")]
 [assembly: System.Reflection.AssemblyProductAttribute("BPrpi4SW")]
 [assembly: System.Reflection.AssemblyTitleAttribute("BPrpi4SW")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]

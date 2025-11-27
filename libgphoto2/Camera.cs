@@ -185,7 +185,6 @@ public class Camera
         _driver.Shutdown();
     }
     
-    // Liveview helpers
     public byte[] GetLiveViewBytes()
     {
         return _driver.CapturePreviewBytes();
