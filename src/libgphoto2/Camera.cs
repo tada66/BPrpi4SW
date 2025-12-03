@@ -9,12 +9,54 @@ public class Camera
     public IsoProperty Iso { get; }
     public ShutterProperty shutterSpeed { get; }
     public ApertureProperty aperture { get; }
+    public Focus focus { get; }
 
     public Camera()
     {
         Iso = new IsoProperty(this);
         shutterSpeed = new ShutterProperty(this);
         aperture = new ApertureProperty(this);
+        focus = new Focus(this);
+    }
+
+    public class Focus
+    {
+        private readonly Camera _owner;
+        internal Focus(Camera owner) { _owner = owner; }
+
+        public string mode
+        {
+            get => _owner._driver.GetWidgetInfo("focusmode")?.CurrentValue ?? "";
+            set
+            {
+                if (!_owner.focus.Values.Contains(value))
+                    throw new ArgumentException($"Focus Mode value '{value}' is not supported by the camera.", nameof(value));
+                _owner._driver.SetWidgetValueByPath("focusmode", value);
+            }
+        }
+
+        public IReadOnlyList<string> Values
+        {
+            get
+            {
+                var choices = _owner._driver.GetWidgetInfo("focusmode")?.Choices;
+                return choices != null ? new List<string>(choices) : new List<string>();
+            }
+        }
+
+        public void Closer(int step)
+        {
+            if(step < 0) throw new ArgumentOutOfRangeException(nameof(step), "Focus step cannot be negative.");
+            if(step > 7) throw new ArgumentOutOfRangeException(nameof(step), "Focus step cannot be greater than 7.");
+            _owner._driver.SetWidgetValueByPath("manualfocus", (-step).ToString());
+        }
+
+        public void Further(int step)
+        {
+            if(step < 0) throw new ArgumentOutOfRangeException(nameof(step), "Focus step cannot be negative.");
+            if(step > 7) throw new ArgumentOutOfRangeException(nameof(step), "Focus step cannot be greater than 7.");
+            _owner._driver.SetWidgetValueByPath("manualfocus", step.ToString());
+        }
     }
 
     public class IsoProperty {
@@ -164,6 +206,25 @@ public class Camera
         return _driver.GetAvailableCameras();
     }
 
+    public void Magnify()
+    {
+        ToggleSetting("focusmagnify");
+        Thread.Sleep(250);
+        ToggleSetting("focusmagnify");
+    }
+
+    public void Magnify2x()
+    {
+        Magnify();
+        Thread.Sleep(250);
+        ToggleSetting("focusmagnify");
+    }
+
+    public void MagnifyOff()
+    {
+        _driver.SetWidgetValueByPath("focusmagnify", "0");
+        ToggleSetting("focusmagnifyexit");
+    }
     public void ConnectCamera(string port) {
         _driver.SelectCamera(port);
         _driver.EnsureInitialized();
@@ -193,5 +254,12 @@ public class Camera
     public void SaveLiveView(string path)
     {
         _driver.CapturePreviewToFile(path);
+    }
+
+    private void ToggleSetting(string settingPath)
+    {
+        _driver.SetWidgetValueByPath(settingPath, "1");
+        Thread.Sleep(50);
+        _driver.SetWidgetValueByPath(settingPath, "0");
     }
 }

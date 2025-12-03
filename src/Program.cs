@@ -38,18 +38,24 @@ class Program
             Console.WriteLine($"Selecting: {selected.Model}");
             
             cam.ConnectCamera(selected.Port);
-            cam.Iso.value = 3200;
-            Console.WriteLine("ISO set to: " + cam.Iso.value);
-            Console.WriteLine("ISO index: " + cam.Iso.index);
+            Console.WriteLine($"Camera {cam.cameramodel} connected.");
+            Console.WriteLine("--- CAMERA INFO ---");
+            Console.WriteLine($"Model: {cam.cameramodel}");
+            Console.WriteLine($"Manufacturer: {cam.manufacturer}");
+            Console.WriteLine($"Battery Level: {cam.batteryLevel}");
+            Console.WriteLine($"Focus Mode: {cam.focus.mode}");
+            Console.WriteLine($"NOTICE: RAW EXTENSION IS SET TO {cam.rawExtension}");
+            Console.WriteLine("-------------------");
+            cam.Iso.value = 1250;
+            Console.WriteLine($"ISO set to: {cam.Iso.value}, index: {cam.Iso.index}");
             cam.shutterSpeed.value = "1/60";
-            Console.WriteLine("Shutter Speed set to: " + cam.shutterSpeed.value);
-            Console.WriteLine("Shutter Speed index: " + cam.shutterSpeed.index);
+            Console.WriteLine($"Shutter Speed set to: {cam.shutterSpeed.value}, index: {cam.shutterSpeed.index}");
             cam.aperture.value = "2.8";
-            Console.WriteLine("Aperture set to: " + cam.aperture.value);
-            Console.WriteLine("Aperture index: " + cam.aperture.index);
-            Console.WriteLine("Supported ISO values: " + string.Join(", ", cam.Iso.Values));
-            Console.WriteLine("Supported Shutter Speed values: " + string.Join(", ", cam.shutterSpeed.Values));
-            Console.WriteLine("Supported Aperture values: " + string.Join(", ", cam.aperture.Values));
+            Console.WriteLine($"Aperture set to: {cam.aperture.value}, index: {cam.aperture.index}");
+            //Console.WriteLine("Supported ISO values: " + string.Join(", ", cam.Iso.Values));
+            //Console.WriteLine("Supported Shutter Speed values: " + string.Join(", ", cam.shutterSpeed.Values));
+            //Console.WriteLine("Supported Aperture values: " + string.Join(", ", cam.aperture.Values));
+            Console.WriteLine("Camera configuration done.");
 
             // Start Live View Streaming
             string targetHost = "10.0.0.20"; // PC IP
