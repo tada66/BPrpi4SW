@@ -62,7 +62,7 @@ internal class libgphoto2Driver
     [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
     private static extern int gp_file_save(IntPtr file, string filename);
     [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
-    private static extern int gp_camera_capture_preview(IntPtr camera, out IntPtr file, IntPtr context);
+    private static extern int gp_camera_capture_preview(IntPtr camera, IntPtr file, IntPtr context);
     [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
     private static extern int gp_file_get_data_and_size(IntPtr file, out IntPtr data, out ulong size);
     [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
@@ -581,9 +581,10 @@ internal class libgphoto2Driver
         EnsureInitialized();
         lock (_sync)
         {
-            ThrowIfError(gp_camera_capture_preview(_cam, out var file, _ctx), "gp_camera_capture_preview");
+            ThrowIfError(gp_file_new(out var file), "gp_file_new");
             try
             {
+                ThrowIfError(gp_camera_capture_preview(_cam, file, _ctx), "gp_camera_capture_preview");
                 ThrowIfError(gp_file_get_data_and_size(file, out var dataPtr, out var size), "gp_file_get_data_and_size");
                 if (dataPtr == IntPtr.Zero || size == 0) return Array.Empty<byte>();
                 if (size > int.MaxValue) throw new InvalidOperationException("Preview size too large");

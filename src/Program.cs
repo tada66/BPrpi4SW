@@ -47,12 +47,21 @@ class Program
             cam.aperture.value = "2.8";
             Console.WriteLine("Aperture set to: " + cam.aperture.value);
             Console.WriteLine("Aperture index: " + cam.aperture.index);
-            //Console.WriteLine("Supported ISO values: " + string.Join(", ", cam.Iso.Values));
-            //Console.WriteLine("Supported Shutter Speed values: " + string.Join(", ", cam.shutterSpeed.Values));
-            //Console.WriteLine("Supported Aperture values: " + string.Join(", ", cam.aperture.Values));
+            Console.WriteLine("Supported ISO values: " + string.Join(", ", cam.Iso.Values));
+            Console.WriteLine("Supported Shutter Speed values: " + string.Join(", ", cam.shutterSpeed.Values));
+            Console.WriteLine("Supported Aperture values: " + string.Join(", ", cam.aperture.Values));
 
+            // Start Live View Streaming
+            string targetHost = "10.0.0.20"; // PC IP
+            int targetPort = 5000;
+            Console.WriteLine($"Starting Live View Stream to {targetHost}:{targetPort}...");
+            var sender = new TcpLiveViewSender(cam, targetHost, targetPort);
+            sender.Start();
 
-            Console.WriteLine(cam.GetLiveViewBytes());
+            Console.WriteLine("Press Enter to exit...");
+            Console.ReadLine();
+            
+            sender.Stop();
         }
         catch (Exception ex)
         {
