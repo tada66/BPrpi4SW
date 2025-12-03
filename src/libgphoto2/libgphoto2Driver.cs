@@ -1,4 +1,5 @@
 using System;
+using System.Linq;
 using System.Runtime.InteropServices;
 using System.Collections.Generic;
 
@@ -24,6 +25,43 @@ internal class libgphoto2Driver
 
     internal enum GPCaptureType : int { Image = 0 }
     internal enum GPFileType : int { Normal = 1 }
+
+    internal enum GPResult : int
+    {
+        GP_OK = 0,
+        GP_ERROR = -1,
+        GP_ERROR_BAD_PARAMETERS = -2,
+        GP_ERROR_NO_MEMORY = -3,
+        GP_ERROR_LIBRARY = -4,
+        GP_ERROR_UNKNOWN_PORT = -5,
+        GP_ERROR_NOT_SUPPORTED = -6,
+        GP_ERROR_IO = -7,
+        GP_ERROR_FIXED_LIMIT_EXCEEDED = -8,
+        GP_ERROR_TIMEOUT = -10,
+        GP_ERROR_IO_SUPPORTED_SERIAL = -20,
+        GP_ERROR_IO_SUPPORTED_USB = -21,
+        GP_ERROR_IO_INIT = -31,
+        GP_ERROR_IO_READ = -34,
+        GP_ERROR_IO_WRITE = -35,
+        GP_ERROR_IO_UPDATE = -37,
+        GP_ERROR_IO_SERIAL_SPEED = -41,
+        GP_ERROR_IO_USB_CLAIM = -51,
+        GP_ERROR_IO_USB_FIND = -52,
+        GP_ERROR_IO_LOCK = -60,
+        GP_ERROR_HAL = -70,
+        GP_ERROR_CORRUPTED_DATA = -102,
+        GP_ERROR_FILE_EXISTS = -103,
+        GP_ERROR_MODEL_NOT_FOUND = -105,
+        GP_ERROR_DIRECTORY_NOT_FOUND = -107,
+        GP_ERROR_FILE_NOT_FOUND = -108,
+        GP_ERROR_DIRECTORY_EXISTS = -109,
+        GP_ERROR_CAMERA_BUSY = -110,
+        GP_ERROR_PATH_NOT_ABSOLUTE = -111,
+        GP_ERROR_CANCEL = -112,
+        GP_ERROR_CAMERA_ERROR = -113,
+        GP_ERROR_OS_FAILURE = -114,
+        GP_ERROR_NO_SPACE = -115
+    }
 
     // Widget types (subset of libgphoto2 CameraWidgetType)
     internal enum CameraWidgetType
@@ -143,6 +181,8 @@ internal class libgphoto2Driver
     }
 
     private string? _targetPort; // If set, we init this specific camera
+    private string? _targetModel;
+    private string? _lockedSerial;
 
     internal sealed record WidgetInfo(
         string Path,
@@ -171,7 +211,11 @@ internal class libgphoto2Driver
 
     private static void ThrowIfError(int code, string where)
     {
-        if (code < 0) throw new InvalidOperationException($"{where} failed: {ResultString(code)} ({code})");
+        if (code < 0) 
+        {
+            var errorName = Enum.IsDefined(typeof(GPResult), code) ? ((GPResult)code).ToString() : "Unknown Error";
+            throw new InvalidOperationException($"{where} failed: {ResultString(code)} ({errorName} / {code})");
+        }
     }
 
     internal void EnsureInitialized()
@@ -185,15 +229,73 @@ internal class libgphoto2Driver
             
             ThrowIfError(gp_camera_new(out _cam), "gp_camera_new");
 
-            // If a specific port was requested, configure it before init
-            if (!string.IsNullOrEmpty(_targetPort))
+            string? portToUse = _targetPort;
+
+            if (string.IsNullOrEmpty(portToUse) && !string.IsNullOrEmpty(_targetModel))
             {
-                ConfigurePort(_cam, _targetPort);
+                try 
+                {
+                    var candidates = GetAvailableCameras().Where(c => c.Model == _targetModel).ToList();
+                    foreach (var candidate in candidates)
+                    {
+                        // If we haven't locked a serial yet, just take the first matching model
+                        if (string.IsNullOrEmpty(_lockedSerial))
+                        {
+                            portToUse = candidate.Port;
+                            break;
+                        }
+
+                        // If we have a locked serial, we must verify it
+                        ConfigurePort(_cam, candidate.Port);
+                        if (gp_camera_init(_cam, _ctx) >= 0)
+                        {
+                            _initialized = true; // Temporarily mark as init to use helper
+                            var serial = GetWidgetValueByPath("serialnumber") ?? GetWidgetValueByPath("eosserialnumber");
+                            _initialized = false; // Reset
+
+                            if (serial == _lockedSerial)
+                            {
+                                portToUse = candidate.Port;
+                                // We are already init'd on the right port, but to be clean and consistent with flow below:
+                                gp_camera_exit(_cam, _ctx); 
+                                // We will re-init below properly
+                                break;
+                            }
+                            
+                            // Wrong serial, cleanup and try next
+                            gp_camera_exit(_cam, _ctx);
+                        }
+                        
+                        // Reset camera object for next attempt
+                        gp_camera_unref(_cam);
+                        gp_camera_new(out _cam);
+                    }
+                }
+                catch { }
+            }
+
+            if (!string.IsNullOrEmpty(portToUse))
+            {
+                ConfigurePort(_cam, portToUse);
             }
 
             try
             {
                 ThrowIfError(gp_camera_init(_cam, _ctx), "gp_camera_init");
+                _initialized = true;
+
+                // Lock serial if not yet locked
+                if (string.IsNullOrEmpty(_lockedSerial))
+                {
+                    _lockedSerial = GetWidgetValueByPath("serialnumber") ?? GetWidgetValueByPath("eosserialnumber");
+                    if (!string.IsNullOrEmpty(_lockedSerial))
+                    {
+                        Console.WriteLine($"[Driver] Locked to camera serial: {_lockedSerial}");
+                    }
+                }
+                
+                // Update target port to the one we successfully connected to
+                if (!string.IsNullOrEmpty(portToUse)) _targetPort = portToUse;
             }
             catch
             {
@@ -257,12 +359,24 @@ internal class libgphoto2Driver
     }
 
     // Select which camera to use for subsequent calls
-    internal void SelectCamera(string port)
+    internal void SelectCamera(string port, string model)
     {
         lock (_sync)
         {
             if (_initialized) Shutdown(); // Force re-init with new port
             _targetPort = port;
+            _targetModel = model;
+            _lockedSerial = null; // Reset serial on new selection
+        }
+    }
+
+    internal void ClearSelectedPort()
+    {
+        lock (_sync)
+        {
+            if (_initialized) Shutdown();
+            _targetPort = null;
+            // Keep _targetModel and _lockedSerial for recovery
         }
     }
 

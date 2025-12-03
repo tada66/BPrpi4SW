@@ -1,5 +1,4 @@
-﻿// See https://aka.ms/new-console-template for more information
-using System;
+﻿using System;
 using System.Linq;
 using System.Net;
 
@@ -37,7 +36,7 @@ class Program
             var selected = cameras[0]; 
             Console.WriteLine($"Selecting: {selected.Model}");
             
-            cam.ConnectCamera(selected.Port);
+            cam.ConnectCamera(selected);
             Console.WriteLine($"Camera {cam.cameramodel} connected.");
             Console.WriteLine("--- CAMERA INFO ---");
             Console.WriteLine($"Model: {cam.cameramodel}");

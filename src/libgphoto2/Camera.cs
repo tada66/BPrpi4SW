@@ -9,24 +9,24 @@ public class Camera
     public IsoProperty Iso { get; }
     public ShutterProperty shutterSpeed { get; }
     public ApertureProperty aperture { get; }
-    public Focus focus { get; }
+    public FocusProperty focus { get; }
 
     public Camera()
     {
         Iso = new IsoProperty(this);
         shutterSpeed = new ShutterProperty(this);
         aperture = new ApertureProperty(this);
-        focus = new Focus(this);
+        focus = new FocusProperty(this);
     }
 
-    public class Focus
+    public class FocusProperty
     {
         private readonly Camera _owner;
-        internal Focus(Camera owner) { _owner = owner; }
+        internal FocusProperty(Camera owner) { _owner = owner; }
 
         public string mode
         {
-            get => _owner._driver.GetWidgetInfo("focusmode")?.CurrentValue ?? "";
+            get => _owner._driver.GetWidgetInfo("focusmode")?.CurrentValue ?? "UNKNOWN";
             set
             {
                 if (!_owner.focus.Values.Contains(value))
@@ -225,9 +225,13 @@ public class Camera
         _driver.SetWidgetValueByPath("focusmagnify", "0");
         ToggleSetting("focusmagnifyexit");
     }
-    public void ConnectCamera(string port) {
-        _driver.SelectCamera(port);
+    public void ConnectCamera(AvailableCamera cam) {
+        _driver.SelectCamera(cam.Port, cam.Model);
         _driver.EnsureInitialized();
+    }
+
+    public void ClearSelectedCamera() {
+        _driver.ClearSelectedPort();
     }
 
     public string CaptureImage(string outputPath) {
