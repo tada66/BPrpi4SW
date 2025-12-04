@@ -1,28 +1,38 @@
 ﻿using System;
 using System.Linq;
 using System.Net;
+using System.Net.Sockets;
+using Iot.Device.CharacterLcd;
 
 class Program
 {
     static void Main()
     {
+        using var lcd = new LcdController();
+        lcd.WriteStatus("Program Starting...");
+        
+        string ip = GetLocalIPAddress();
+        lcd.WriteStatus($"IP: {ip}");
+
         if (!OperatingSystem.IsLinux())
         {
             Console.WriteLine("This program can only run on Linux.");
+            lcd.WriteStatus("Error: Not Linux");
             return;
         }
 
         Camera? cam = null;
         try
         {
-            // 1. List cameras
             cam = new Camera();
             Console.WriteLine("Detecting cameras...");
+            lcd.WriteStatus("Detecting Cam...");
             var cameras = cam.GetAvailableCameras().ToList();
             
             if (cameras.Count == 0)
             {
                 Console.WriteLine("No cameras found.");
+                lcd.WriteStatus("No Camera Found");
                 return;
             }
 
@@ -31,6 +41,7 @@ class Program
             {
                 Console.WriteLine($"[{i}] {cameras[i].Model} on {cameras[i].Port}");
             }
+            lcd.WritePos(12345.6f, -56.7f, 0.8f);
 
             // 2. Select the first one (or add logic to pick specific one)
             var selected = cameras[0]; 
@@ -38,29 +49,41 @@ class Program
             
             cam.ConnectCamera(selected);
             Console.WriteLine($"Camera {cam.cameramodel} connected.");
+            lcd.WriteStatus("Connected");
+
             Console.WriteLine("--- CAMERA INFO ---");
             Console.WriteLine($"Model: {cam.cameramodel}");
             Console.WriteLine($"Manufacturer: {cam.manufacturer}");
             Console.WriteLine($"Battery Level: {cam.batteryLevel}");
             Console.WriteLine($"Focus Mode: {cam.focus.mode}");
             Console.WriteLine("-------------------");
-            cam.Iso.value = 1250;
-            Console.WriteLine($"ISO set to: {cam.Iso.value}, index: {cam.Iso.index}");
-            cam.shutterSpeed.value = "1/60";
-            Console.WriteLine($"Shutter Speed set to: {cam.shutterSpeed.value}, index: {cam.shutterSpeed.index}");
-            cam.aperture.value = "2.8";
-            Console.WriteLine($"Aperture set to: {cam.aperture.value}, index: {cam.aperture.index}");
+            lcd.WriteStatus(cam.cameramodel + " Ready");
+            
+            try {
+                cam.Iso.value = 1250;
+                Console.WriteLine($"ISO set to: {cam.Iso.value}, index: {cam.Iso.index}");
+                cam.shutterSpeed.value = "1/60";
+                Console.WriteLine($"Shutter Speed set to: {cam.shutterSpeed.value}, index: {cam.shutterSpeed.index}");
+                cam.aperture.value = "2.8";
+                Console.WriteLine($"Aperture set to: {cam.aperture.value}, index: {cam.aperture.index}");
+            } catch (Exception ex) {
+                Console.WriteLine($"Config warning: {ex.Message}");
+            }
+            
+
+
             //Console.WriteLine("Supported ISO values: " + string.Join(", ", cam.Iso.Values));
             //Console.WriteLine("Supported Shutter Speed values: " + string.Join(", ", cam.shutterSpeed.Values));
             //Console.WriteLine("Supported Aperture values: " + string.Join(", ", cam.aperture.Values));
             Console.WriteLine("Camera configuration done.");
-            cam.CaptureImage("img");
-            Console.WriteLine("Captured image");
+            
 
             // Start Live View Streaming
             string targetHost = "10.0.0.20"; // PC IP
             int targetPort = 5000;
             Console.WriteLine($"Starting Live View Stream to {targetHost}:{targetPort}...");
+            lcd.WriteStatus("Streaming...");
+            
             var sender = new TcpLiveViewSender(cam, targetHost, targetPort);
             sender.Start();
 
@@ -72,10 +95,37 @@ class Program
         catch (Exception ex)
         {
             Console.WriteLine($"Error: {ex.Message}");
+            lcd.WriteStatus("Error!");
+            lcd.WriteStatus(ex.Message);
         }
         finally
         {
             cam?.Shutdown();
         }
+    }
+
+    static string GetLocalIPAddress()
+    {
+        try
+        {
+            // Iterate over network interfaces to find a real IP, avoiding 127.0.1.1 (common on Linux)
+            var interfaces = System.Net.NetworkInformation.NetworkInterface.GetAllNetworkInterfaces()
+                .Where(i => i.OperationalStatus == System.Net.NetworkInformation.OperationalStatus.Up)
+                .Where(i => i.NetworkInterfaceType != System.Net.NetworkInformation.NetworkInterfaceType.Loopback);
+
+            foreach (var iface in interfaces)
+            {
+                var props = iface.GetIPProperties();
+                // Prefer WLAN or Ethernet
+                var ip = props.UnicastAddresses
+                    .Where(a => a.Address.AddressFamily == AddressFamily.InterNetwork)
+                    .Select(a => a.Address)
+                    .FirstOrDefault();
+                
+                if (ip != null) return ip.ToString();
+            }
+        }
+        catch { }
+        return "No IP";
     }
 }
