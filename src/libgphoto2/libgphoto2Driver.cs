@@ -418,8 +418,9 @@ internal class libgphoto2Driver
         EnsureInitialized();
     }
 
-    internal void Capture(string outputPath)
+    internal string Capture(string outputPath)
     {
+        string filename = "";
         EnsureInitialized();
         lock (_sync)
         {
@@ -431,12 +432,14 @@ internal class libgphoto2Driver
                 string extension = System.IO.Path.GetExtension(path.name).TrimStart('.').ToLowerInvariant();
                 ThrowIfError(gp_camera_file_get(_cam, path.folder, path.name, GPFileType.Normal, file, _ctx), "gp_camera_file_get");
                 ThrowIfError(gp_file_save(file, outputPath + "." + extension), "gp_file_save");
+                filename = outputPath + "." + extension;
             }
             finally
             {
                 if (file != IntPtr.Zero) gp_file_free(file);
             }
         }
+        return filename;
     }
 
     internal IReadOnlyList<string> ListWidgets()
