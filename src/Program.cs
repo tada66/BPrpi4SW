@@ -43,7 +43,6 @@ class Program
             Console.WriteLine($"Manufacturer: {cam.manufacturer}");
             Console.WriteLine($"Battery Level: {cam.batteryLevel}");
             Console.WriteLine($"Focus Mode: {cam.focus.mode}");
-            Console.WriteLine($"NOTICE: RAW EXTENSION IS SET TO {cam.rawExtension}");
             Console.WriteLine("-------------------");
             cam.Iso.value = 1250;
             Console.WriteLine($"ISO set to: {cam.Iso.value}, index: {cam.Iso.index}");
@@ -55,6 +54,8 @@ class Program
             //Console.WriteLine("Supported Shutter Speed values: " + string.Join(", ", cam.shutterSpeed.Values));
             //Console.WriteLine("Supported Aperture values: " + string.Join(", ", cam.aperture.Values));
             Console.WriteLine("Camera configuration done.");
+            cam.CaptureImage("img");
+            Console.WriteLine("Captured image");
 
             // Start Live View Streaming
             string targetHost = "10.0.0.20"; // PC IP

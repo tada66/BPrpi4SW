@@ -192,15 +192,13 @@ public class Camera
         public void RefreshValues() { lock (_cacheLock) { _cachedValues = null; } }
     }
 
-    public string rawExtension {
-        get; set;
-    } = ".dng";
-
     public string batteryLevel => _driver.GetWidgetInfo("batterylevel")?.CurrentValue ?? "UNKNOWN";
 
     public string cameramodel => _driver.GetWidgetInfo("cameramodel")?.CurrentValue ?? "UNKNOWN";
 
     public string manufacturer => _driver.GetWidgetInfo("manufacturer")?.CurrentValue ?? "UNKNOWN";
+
+    public bool connected => _driver.IsCameraConnected();
 
     public IEnumerable<AvailableCamera> GetAvailableCameras() {
         return _driver.GetAvailableCameras();
@@ -234,10 +232,11 @@ public class Camera
         _driver.ClearSelectedPort();
     }
 
+    // NOTE: CaptureImage cannot be used to capture bulb exposures, the length of the exposure will be undefined!
     public string CaptureImage(string outputPath) {
         if(_driver.GetWidgetInfo("imagequality")?.CurrentValue == "RAW"){
-            _driver.Capture(outputPath + rawExtension);
-            return outputPath + rawExtension;
+            _driver.Capture(outputPath);
+            return outputPath;
         }
         else
         {
@@ -246,22 +245,47 @@ public class Camera
         }
     }
 
+    public void CaptureImageBulb(float time, string outputPath) {
+        if (time < 0) throw new ArgumentOutOfRangeException(nameof(time), "Time cannot be negative.");
+
+        _driver.SetWidgetValueByPath("capture", "1");
+        Thread.Sleep((int)(time * 1000));
+        _driver.SetWidgetValueByPath("capture", "0");
+        Console.WriteLine("Capture complete, waiting for image to be available...");
+
+        int maxWait = 10000; // 10 seconds timeout
+        int elapsed = 0;
+        while (elapsed < maxWait)
+        {
+            var cameraPath = _driver.WaitForImage(1000); // Wait 1s at a time
+            if (cameraPath != null)
+            {
+                Console.WriteLine($"Image available at camera path: {cameraPath}");
+                string extension = System.IO.Path.GetExtension(cameraPath).ToLower();
+                string folder = System.IO.Path.GetDirectoryName(cameraPath)?.Replace("\\", "/") ?? "/";
+                string filename = System.IO.Path.GetFileName(cameraPath);
+                _driver.DownloadFile(folder, filename, outputPath + extension);
+                return;
+            }
+            elapsed += 1000;
+        }
+        throw new TimeoutException("Timed out waiting for image to be saved by camera.");
+    }
+
+
     public void Shutdown() {
         _driver.Shutdown();
     }
     
-    public byte[] GetLiveViewBytes()
-    {
+    public byte[] GetLiveViewBytes() {
         return _driver.CapturePreviewBytes();
     }
     
-    public void SaveLiveView(string path)
-    {
+    public void SaveLiveView(string path) {
         _driver.CapturePreviewToFile(path);
     }
 
-    private void ToggleSetting(string settingPath)
-    {
+    private void ToggleSetting(string settingPath) {
         _driver.SetWidgetValueByPath(settingPath, "1");
         Thread.Sleep(50);
         _driver.SetWidgetValueByPath(settingPath, "0");

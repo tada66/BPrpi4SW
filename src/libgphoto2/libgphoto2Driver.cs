@@ -2,6 +2,7 @@ using System;
 using System.Linq;
 using System.Runtime.InteropServices;
 using System.Collections.Generic;
+using System.Reflection.Metadata.Ecma335;
 
 public record AvailableCamera(string Model, string Port);
 
@@ -77,6 +78,15 @@ internal class libgphoto2Driver
         GP_WIDGET_DATE = 8
     }
 
+    internal enum CameraEventType
+    {
+        GP_EVENT_UNKNOWN = 0,
+        GP_EVENT_TIMEOUT = 1,
+        GP_EVENT_FILE_ADDED = 2,
+        GP_EVENT_FOLDER_ADDED = 3,
+        GP_EVENT_CAPTURE_COMPLETE = 4
+    }
+
     [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
     private static extern IntPtr gp_context_new();
     [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
@@ -91,6 +101,8 @@ internal class libgphoto2Driver
     private static extern void gp_camera_unref(IntPtr camera);
     [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
     private static extern int gp_camera_capture(IntPtr camera, GPCaptureType type, ref CameraFilePath path, IntPtr context);
+    [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+    private static extern int gp_camera_wait_for_event(IntPtr camera, int timeout, out CameraEventType eventType, out IntPtr eventData, IntPtr context);
     [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
     private static extern int gp_file_new(out IntPtr file);
     [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
@@ -215,6 +227,14 @@ internal class libgphoto2Driver
         {
             var errorName = Enum.IsDefined(typeof(GPResult), code) ? ((GPResult)code).ToString() : "Unknown Error";
             throw new InvalidOperationException($"{where} failed: {ResultString(code)} ({errorName} / {code})");
+        }
+    }
+
+    internal bool IsCameraConnected()
+    {
+        lock (_sync)
+        {
+            return _initialized;
         }
     }
 
@@ -408,8 +428,9 @@ internal class libgphoto2Driver
             ThrowIfError(gp_file_new(out var file), "gp_file_new");
             try
             {
+                string extension = System.IO.Path.GetExtension(path.name).TrimStart('.').ToLowerInvariant();
                 ThrowIfError(gp_camera_file_get(_cam, path.folder, path.name, GPFileType.Normal, file, _ctx), "gp_camera_file_get");
-                ThrowIfError(gp_file_save(file, outputPath), "gp_file_save");
+                ThrowIfError(gp_file_save(file, outputPath + "." + extension), "gp_file_save");
             }
             finally
             {
@@ -719,5 +740,50 @@ internal class libgphoto2Driver
         var buf = CapturePreviewBytes();
         if (buf.Length == 0) throw new InvalidOperationException("No preview data received");
         System.IO.File.WriteAllBytes(path, buf);
+    }
+
+    internal string? WaitForImage(int timeoutMs)
+    {
+        EnsureInitialized();
+        lock (_sync)
+        {
+            IntPtr eventData = IntPtr.Zero;
+            try
+            {
+                ThrowIfError(gp_camera_wait_for_event(_cam, timeoutMs, out var eventType, out eventData, _ctx), "gp_camera_wait_for_event");
+                
+                if (eventType == CameraEventType.GP_EVENT_FILE_ADDED && eventData != IntPtr.Zero)
+                {
+                    var path = Marshal.PtrToStructure<CameraFilePath>(eventData);
+                    return System.IO.Path.Combine(path.folder, path.name);
+                }
+                return null;
+            }
+            finally
+            {
+                free(eventData);
+            }
+        }
+    }
+
+    [DllImport("libc", CallingConvention = CallingConvention.Cdecl)]
+    private static extern void free(IntPtr ptr);
+
+    internal void DownloadFile(string folder, string filename, string outputPath)
+    {
+        EnsureInitialized();
+        lock (_sync)
+        {
+            ThrowIfError(gp_file_new(out var file), "gp_file_new");
+            try
+            {
+                ThrowIfError(gp_camera_file_get(_cam, folder, filename, GPFileType.Normal, file, _ctx), "gp_camera_file_get");
+                ThrowIfError(gp_file_save(file, outputPath), "gp_file_save");
+            }
+            finally
+            {
+                if (file != IntPtr.Zero) gp_file_free(file);
+            }
+        }
     }
 }
