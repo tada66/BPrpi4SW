@@ -6,6 +6,7 @@ using Iot.Device.CharacterLcd;
 
 class Program
 {
+    static LcdController lcd = new LcdController();
     static void Main()
     {
         using var lcd = new LcdController();
@@ -20,7 +21,14 @@ class Program
             lcd.WriteStatus("Error: Not Linux");
             return;
         }
+        using var uart = new UartClient();
+        uart.RunInteractiveAsync();
+        //CameraTest();
+    }
 
+
+    private static void CameraTest()
+    {
         Camera? cam = null;
         try
         {
@@ -110,7 +118,6 @@ class Program
             cam?.Shutdown();
         }
     }
-
     static string GetLocalIPAddress()
     {
         try
