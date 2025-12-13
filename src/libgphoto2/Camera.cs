@@ -49,17 +49,23 @@ public class Camera
             }
         }
 
+        public (float Min, float Max, float Step)? GetManualFocusDriveRange()
+        {
+            if(!_owner._interpreter.HasCapability("Configuration")) throw new NotSupportedException("Configuration capability is disabled.");
+            return _owner._driver.GetWidgetInfo("manualfocusdrive")?.Range;
+        }
+
         public void Closer(int step)
         {
             if(step < 0) throw new ArgumentOutOfRangeException(nameof(step), "Focus step cannot be negative.");
-            if(step > 7) throw new ArgumentOutOfRangeException(nameof(step), "Focus step cannot be greater than 7.");
+            if(step > GetManualFocusDriveRange()?.Max) throw new ArgumentOutOfRangeException(nameof(step), "Focus step cannot be greater than the maximum range.");
             _owner._interpreter.Execute("FocusCloser", step);
         }
 
         public void Further(int step)
         {
             if(step < 0) throw new ArgumentOutOfRangeException(nameof(step), "Focus step cannot be negative.");
-            if(step > 7) throw new ArgumentOutOfRangeException(nameof(step), "Focus step cannot be greater than 7.");
+            if(step > GetManualFocusDriveRange()?.Max) throw new ArgumentOutOfRangeException(nameof(step), "Focus step cannot be greater than the maximum range.");
             _owner._interpreter.Execute("FocusFurther", step);
         }
     }
@@ -79,8 +85,8 @@ public class Camera
             set{
                 if (!_owner._interpreter.HasCapability("Configuration")) throw new NotSupportedException("Configuration capability is disabled.");
                 if(value < 0) throw new ArgumentOutOfRangeException(nameof(value), "ISO value cannot be negative.");
-                if(!_owner.Iso.Values.Contains(value.ToString()))
-                    throw new ArgumentException($"ISO value '{value}' is not supported by the camera.", nameof(value));
+                //if(!_owner.Iso.Values.Contains(value.ToString()))
+                //    throw new ArgumentException($"ISO value '{value}' is not supported by the camera.", nameof(value));
                  _owner._driver.SetWidgetValueByPath("iso", value.ToString());
             }
         }
@@ -135,8 +141,8 @@ public class Camera
             }
             set { 
                 if (!_owner._interpreter.HasCapability("Configuration")) throw new NotSupportedException("Configuration capability is disabled.");
-                if (!_owner.shutterSpeed.Values.Contains(value))
-                    throw new ArgumentException($"Shutter Speed value '{value}' is not supported by the camera.", nameof(value));
+                //if (!_owner.shutterSpeed.Values.Contains(value))
+                //    throw new ArgumentException($"Shutter Speed value '{value}' is not supported by the camera.", nameof(value));
                 _owner._driver.SetWidgetValueByPath("shutterspeed", value); 
                 }
         }
@@ -186,8 +192,8 @@ public class Camera
             }
             set { 
                 if (!_owner._interpreter.HasCapability("Configuration")) throw new NotSupportedException("Configuration capability is disabled.");
-                if (!_owner.aperture.Values.Contains(value) && !_owner.aperture.Values.Contains($"f/{value}") && !_owner.aperture.Values.Contains($"f{value}") && !_owner.aperture.Values.Contains($"f {value}"))
-                    throw new ArgumentException($"Aperture value '{value}' is not supported by the camera.", nameof(value));
+                //if (!_owner.aperture.Values.Contains(value) && !_owner.aperture.Values.Contains($"f/{value}") && !_owner.aperture.Values.Contains($"f{value}") && !_owner.aperture.Values.Contains($"f {value}"))
+                //    throw new ArgumentException($"Aperture value '{value}' is not supported by the camera.", nameof(value));
                 _owner._driver.SetWidgetValueByPath("f-number", value); 
                 }
         }
@@ -270,7 +276,7 @@ public class Camera
         string model = SanitizeFilename(this.cameramodel);
         if (!string.IsNullOrEmpty(model))
         {
-             string modelPath = System.IO.Path.Combine(baseDir, "specific", $"{model}_commands.conf");
+             string modelPath = System.IO.Path.Combine(baseDir, "specific", $"{model}.conf");
              if (System.IO.File.Exists(modelPath))
              {
                  Console.WriteLine($"Loading config: {modelPath}");
@@ -283,7 +289,7 @@ public class Camera
         string make = SanitizeFilename(this.manufacturer);
         if (!string.IsNullOrEmpty(make))
         {
-            string makePath = System.IO.Path.Combine(baseDir, "specific", $"{make}_commands.conf");
+            string makePath = System.IO.Path.Combine(baseDir, "specific", $"{make}_default.conf");
             if (System.IO.File.Exists(makePath))
             {
                 Console.WriteLine($"Loading config: {makePath}");
@@ -291,16 +297,19 @@ public class Camera
                 return;
             }
 
-            // Try "Sony" from "Sony Corporation"
             string simpleMake = make.Split(' ')[0];
             if (make != simpleMake)
             {
-                string simpleMakePath = System.IO.Path.Combine(baseDir, "specific", $"{simpleMake}_commands.conf");
+                string simpleMakePath = System.IO.Path.Combine(baseDir, "specific", $"{simpleMake}_default.conf");
                 if (System.IO.File.Exists(simpleMakePath))
                 {
                     Console.WriteLine($"Loading config: {simpleMakePath}");
                     _interpreter.Load(simpleMakePath);
                     return;
+                }
+                else
+                {
+                    Console.WriteLine($"No specific config found for make: {simpleMakePath}");
                 }
             }
         }
@@ -336,28 +345,37 @@ public class Camera
     public string CaptureImage(string outputPath) {
         if (!_interpreter.HasCapability("ImageCapture"))
             throw new NotSupportedException("Image capture is not supported by the current camera configuration.");
+        if (_liveViewActive) {
+            //TODO: CHECK ON A DSLR HOW THIS ACTUALLY WORKS
+            _interpreter.Execute("StopLiveView");
+            _liveViewActive = false;
+        }
         return _driver.Capture(outputPath);
     }
 
-    public string CaptureImageBulb(float time, string outputPath) {
+    public string CaptureImageBulb(float timeSec, string outputPath) {
         if (!_interpreter.HasCapability("TriggerCapture"))
             throw new NotSupportedException("Bulb/Trigger capture is not supported by the current camera configuration.");
+        if (timeSec < 0) throw new ArgumentOutOfRangeException(nameof(timeSec), "Time cannot be negative.");
 
-        if (time < 0) throw new ArgumentOutOfRangeException(nameof(time), "Time cannot be negative.");
+        if (_liveViewActive) {
+            //TODO: CHECK ON A DSLR HOW THIS ACTUALLY WORKS
+            _interpreter.Execute("StopLiveView");
+            _liveViewActive = false;
+        }
 
         _interpreter.Execute("StartBulb");
-        Thread.Sleep((int)(time * 1000));
+        Thread.Sleep((int)(timeSec * 1000));
         _interpreter.Execute("StopBulb");
         Console.WriteLine("Capture complete, waiting for image to be available...");
 
-        int maxWait = 10000; // 10 seconds timeout
+        int maxWait = 30000; // 30 seconds timeout
         int elapsed = 0;
         while (elapsed < maxWait)
         {
             var cameraPath = _driver.WaitForImage(1000); // Wait 1s at a time
             if (cameraPath != null)
             {
-                Console.WriteLine($"Image available at camera path: {cameraPath}");
                 string extension = System.IO.Path.GetExtension(cameraPath).ToLower();
                 string folder = System.IO.Path.GetDirectoryName(cameraPath)?.Replace("\\", "/") ?? "/";
                 string filename = System.IO.Path.GetFileName(cameraPath);

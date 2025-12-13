@@ -56,6 +56,7 @@ class Program
             Console.WriteLine($"Manufacturer: {cam.manufacturer}");
             Console.WriteLine($"Battery Level: {cam.batteryLevel}");
             Console.WriteLine($"Focus Mode: {cam.focus.mode}");
+            Console.WriteLine($"Focus range: {string.Join(", ", cam.focus.GetManualFocusDriveRange() ?? (0,0,0))}");
             Console.WriteLine("-------------------");
             lcd.WriteStatus(cam.cameramodel + " Ready");
             
@@ -76,7 +77,13 @@ class Program
             //Console.WriteLine("Supported Shutter Speed values: " + string.Join(", ", cam.shutterSpeed.Values));
             //Console.WriteLine("Supported Aperture values: " + string.Join(", ", cam.aperture.Values));
             Console.WriteLine("Camera configuration done.");
-            
+            Console.WriteLine("Capturing image...");
+            cam.CaptureImage("NIKON_captured_image");
+            Console.WriteLine("Image captured.");
+            Console.WriteLine("Capturing bulb exposure (2s)...");
+            cam.shutterSpeed.value = "Bulb";
+            cam.CaptureImageBulb(2, "NIKONB");
+            Console.WriteLine("Bulb exposure captured.");
 
             // Start Live View Streaming
             string targetHost = "10.0.0.20"; // PC IP
