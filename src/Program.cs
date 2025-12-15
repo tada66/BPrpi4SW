@@ -2,13 +2,14 @@
 using System.Linq;
 using System.Net;
 using System.Net.Sockets;
+using System.Threading.Tasks;
 using Iot.Device.CharacterLcd;
 
 class Program
 {
-    static LcdController lcd = new LcdController();
-    static void Main()
+    static async Task Main()
     {
+        Logger.Notice("Program started");
         using var lcd = new LcdController();
         lcd.WriteStatus("Program Starting...");
         
@@ -17,13 +18,42 @@ class Program
 
         if (!OperatingSystem.IsLinux())
         {
-            Console.WriteLine("This program can only run on Linux.");
+            Logger.Error("This program can only run on Linux.");
             lcd.WriteStatus("Error: Not Linux");
             return;
         }
+
+
         using var uart = new UartClient();
-        uart.RunInteractiveAsync();
-        //CameraTest();
+        
+        // Subscribe to UART events to update LCD
+        uart.PositionReceived += (x, y, z) => 
+        {
+            lcd.WritePos((float)x, (float)y, (float)z);
+        };
+
+        uart.StatusReceived += (temp, x, y, z, enabled, paused, fanPct) => 
+        {
+            lcd.WritePos((float)x, (float)y, (float)z);
+            string state = enabled ? (paused ? "   PAUSED" : "  RUNNING") : " DISABLED";
+            lcd.WriteStatus($"Temp:{temp:F1}C {state} ");
+        };
+
+
+        Logger.Notice("UART Client started. LCD listening.");
+
+        while(true)
+        {
+            try 
+            {
+                await uart.RunInteractiveAsync();
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error: {ex.Message}");
+                await Task.Delay(1000);
+            }
+        }
     }
 
 
@@ -34,13 +64,12 @@ class Program
         {
             cam = new Camera();
             Console.WriteLine("Detecting cameras...");
-            lcd.WriteStatus("Detecting Cam...");
             var cameras = cam.GetAvailableCameras().ToList();
             
             if (cameras.Count == 0)
             {
                 Console.WriteLine("No cameras found.");
-                lcd.WriteStatus("No Camera Found");
+                // lcd.WriteStatus("No Camera Found");
                 return;
             }
 
@@ -49,7 +78,6 @@ class Program
             {
                 Console.WriteLine($"[{i}] {cameras[i].Model} on {cameras[i].Port}");
             }
-            lcd.WritePos(12345.6f, -56.7f, 0.8f);
 
             // 2. Select the first one (or add logic to pick specific one)
             var selected = cameras[0]; 
@@ -57,7 +85,7 @@ class Program
             
             cam.ConnectCamera(selected);
             Console.WriteLine($"Camera {cam.cameramodel} connected.");
-            lcd.WriteStatus("Connected");
+            // lcd.WriteStatus("Connected");
 
             Console.WriteLine("--- CAMERA INFO ---");
             Console.WriteLine($"Model: {cam.cameramodel}");
@@ -66,7 +94,7 @@ class Program
             Console.WriteLine($"Focus Mode: {cam.focus.mode}");
             Console.WriteLine($"Focus range: {string.Join(", ", cam.focus.GetManualFocusDriveRange() ?? (0,0,0))}");
             Console.WriteLine("-------------------");
-            lcd.WriteStatus(cam.cameramodel + " Ready");
+            // lcd.WriteStatus(cam.cameramodel + " Ready");
             
             try {
                 cam.Iso.value = 1250;
@@ -97,7 +125,7 @@ class Program
             string targetHost = "10.0.0.20"; // PC IP
             int targetPort = 5000;
             Console.WriteLine($"Starting Live View Stream to {targetHost}:{targetPort}...");
-            lcd.WriteStatus("Streaming...");
+            // lcd.WriteStatus("Streaming...");
             
             var sender = new TcpLiveViewSender(cam, targetHost, targetPort);
             sender.Start();
@@ -110,8 +138,8 @@ class Program
         catch (Exception ex)
         {
             Console.WriteLine($"Error: {ex.Message}");
-            lcd.WriteStatus("Error!");
-            lcd.WriteStatus(ex.Message);
+            // lcd.WriteStatus("Error!");
+            // lcd.WriteStatus(ex.Message);
         }
         finally
         {
