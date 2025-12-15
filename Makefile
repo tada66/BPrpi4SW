@@ -15,4 +15,4 @@ build:
 	-p:PublishTrimmed=true \
 	-o .
 
-.PHONY: build builddev
+.PHONY: build
