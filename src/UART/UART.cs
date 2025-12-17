@@ -53,7 +53,7 @@ public sealed class UartClient : IDisposable
         if (portName == null)
             throw new InvalidOperationException("No suitable serial port found!");
 
-        Logger.Notice($"Using serial port: {portName}");
+        Logger.Info($"Using serial port: {portName}");
 
         _port = new SerialPort(portName, baudRate, Parity.None, 8, StopBits.One)
         {
@@ -66,7 +66,7 @@ public sealed class UartClient : IDisposable
         _port.DiscardInBuffer();
         _port.DiscardOutBuffer();
 
-        Logger.Info("Sending reset bytes...");
+        Logger.Debug("Sending reset bytes...");
         lock (_writeLock)
         {
             _port.Write(new byte[] { 0x00, 0x00, 0x00 }, 0, 3);
@@ -81,7 +81,7 @@ public sealed class UartClient : IDisposable
             Logger.Notice($"Cleared {junk.Length} bytes of pending data");
         }
 
-        Logger.Notice("UART connection established.");
+        Logger.Info("UART connection established.");
 
         // Start receiver thread
         _rxThread = new Thread(ReceiverThread) { IsBackground = true };
@@ -181,7 +181,7 @@ public sealed class UartClient : IDisposable
         // For ACK commands, don't wait for ACK (avoid infinite loop)
         if (cmd == UartCommand.CMD_ACK)
         {
-            Logger.Info($"Sending ACK command: {Convert.ToHexString(packet)}  CMD  : 0x{(byte)cmd:X2}  ID   : {msgId} (0x{msgId:X2})  LEN  : {data.Length}  DATA : {(data.Length > 0 ? Convert.ToHexString(data) : "N/A")}  CRC8 : 0x{raw[^1]:X2}");
+            Logger.Debug($"Sending ACK command: {Convert.ToHexString(packet)}  CMD  : 0x{(byte)cmd:X2}  ID   : {msgId} (0x{msgId:X2})  LEN  : {data.Length}  DATA : {(data.Length > 0 ? Convert.ToHexString(data) : "N/A")}  CRC8 : 0x{raw[^1]:X2}");
             lock (_writeLock)
             {
                 _port.Write(packet, 0, packet.Length);
@@ -191,7 +191,7 @@ public sealed class UartClient : IDisposable
 
         for (int attempt = 1; attempt <= maxAttempts; attempt++)
         {
-            Logger.Info($"Sent command: {Convert.ToHexString(packet)}  CMD  : 0x{(byte)cmd:X2}  ID   : {msgId} (0x{msgId:X2})  LEN  : {data.Length}  DATA : {(data.Length > 0 ? Convert.ToHexString(data) : "N/A")}  CRC8 : 0x{raw[^1]:X2} Attempt {attempt}/{maxAttempts}");
+            Logger.Debug($"Sent command: {Convert.ToHexString(packet)}  CMD  : 0x{(byte)cmd:X2}  ID   : {msgId} (0x{msgId:X2})  LEN  : {data.Length}  DATA : {(data.Length > 0 ? Convert.ToHexString(data) : "N/A")}  CRC8 : 0x{raw[^1]:X2} Attempt {attempt}/{maxAttempts}");
 
             // Track pending ACK
             var tcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -231,7 +231,7 @@ public sealed class UartClient : IDisposable
     /// </summary>
     private void SendAck(byte msgIdToAck)
     {
-        Logger.Info($"  Sending ACK for message ID {msgIdToAck}");
+        Logger.Debug($"  Sending ACK for message ID {msgIdToAck}");
         _ = SendCommandAsync(UartCommand.CMD_ACK, new byte[] { msgIdToAck });
     }
 
@@ -259,7 +259,7 @@ public sealed class UartClient : IDisposable
                         buffer.Clear();
 
                         string hexStr = BitConverter.ToString(frame).Replace("-", "");
-                        Logger.Info($"Received data: {hexStr}");
+                        Logger.Debug($"Received data: {hexStr}");
 
                         // Reasonable frame size check
                         if (frame.Length > 50)
@@ -270,9 +270,9 @@ public sealed class UartClient : IDisposable
 
                         try
                         {
-                            Logger.Info($"COBS frame received ({frame.Length} bytes): {hexStr}");
+                            Logger.Debug($"COBS frame received ({frame.Length} bytes): {hexStr}");
                             byte[] decoded = Cobs.Decode(frame);
-                            Logger.Info($"Decoded ({decoded.Length} bytes): {BitConverter.ToString(decoded).Replace("-", "")}");
+                            Logger.Debug($"Decoded ({decoded.Length} bytes): {BitConverter.ToString(decoded).Replace("-", "")}");
                             ProcessBinaryMessage(decoded);
                         }
                         catch (Exception e)
@@ -328,7 +328,7 @@ public sealed class UartClient : IDisposable
             return;
         }
 
-        Logger.Info($"Received binary message:  CMD  : 0x{cmdType:X2}  ID   : {msgId} (0x{msgId:X2})  LEN  : {dataLength}");
+        Logger.Debug($"Received binary message:  CMD  : 0x{cmdType:X2}  ID   : {msgId} (0x{msgId:X2})  LEN  : {dataLength}");
 
 
         // Extract data
@@ -337,7 +337,7 @@ public sealed class UartClient : IDisposable
             Array.Copy(decoded, 3, data, 0, dataLength);
 
         if (dataLength > 0)
-            Logger.Info($"  DATA : {BitConverter.ToString(data).Replace("-", "")}");
+            Logger.Debug($"  DATA : {BitConverter.ToString(data).Replace("-", "")}");
 
         // Process specific message types
         var cmd = (UartCommand)cmdType;
@@ -348,11 +348,11 @@ public sealed class UartClient : IDisposable
                 if (dataLength >= 1)
                 {
                     byte ackedId = data[0];
-                    Logger.Info($"  Received ACK for message ID: {ackedId} (0x{ackedId:X2})");
+                    Logger.Debug($"  Received ACK for message ID: {ackedId} (0x{ackedId:X2})");
                     if (_pendingAcks.TryRemove(ackedId, out var tcs))
                     {
                         tcs.TrySetResult(true);
-                        Logger.Info($"  Message with ID={ackedId} marked as acknowledged");
+                        Logger.Debug($"  Message with ID={ackedId} marked as acknowledged");
                     }
                     else
                     {
@@ -414,7 +414,7 @@ public sealed class UartClient : IDisposable
                 break;
         }
 
-        Logger.Info($"  CRC8 : 0x{receivedCrc:X2} ({(crcValid ? "Valid" : "INVALID")})");
+        Logger.Debug($"  CRC8 : 0x{receivedCrc:X2} ({(crcValid ? "Valid" : "INVALID")})");
 
         // Report CRC errors
         if (!crcValid)

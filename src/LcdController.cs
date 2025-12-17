@@ -31,16 +31,16 @@ public class LcdController : IDisposable
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"Failed to initialize LCD: {ex.Message}");
+            Logger.Error($"Failed to initialize LCD: {ex.Message}");
         }
     }
 
     public void WritePos(float x, float y, float z)
     {
-        string Fmt(float v) => (v >= 0 ? " " : "") + v.ToString("00000000.0");
-        WriteLine(0, $"X:{Fmt(x)} arcsec");
-        WriteLine(1, $"Y:{Fmt(y)} arcsec");
-        WriteLine(2, $"Z:{Fmt(z)} arcsec");
+        string Fmt(float v) => (v >= 0 ? " " : "") + v.ToString("00000000");
+        WriteLine(0, $"X: {Fmt(x)} arcsecs");
+        WriteLine(1, $"Y: {Fmt(y)} arcsecs");
+        WriteLine(2, $"Z: {Fmt(z)} arcsecs");
     }
 
     public void WriteStatus(string status){
@@ -68,7 +68,7 @@ public class LcdController : IDisposable
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"LCD Write Error: {ex.Message}");
+            Logger.Error($"LCD Write Error: {ex.Message}");
         }
     }
 

@@ -9,7 +9,7 @@ class Program
 {
     static async Task Main()
     {
-        Logger.Notice("Program started");
+        Logger.Debug("Program started");
         using var lcd = new LcdController();
         lcd.WriteStatus("Program Starting...");
         
@@ -18,7 +18,7 @@ class Program
 
         if (!OperatingSystem.IsLinux())
         {
-            Logger.Error("This program can only run on Linux.");
+            Logger.Fatal("This program can only run on Linux.");
             lcd.WriteStatus("Error: Not Linux");
             return;
         }
@@ -40,7 +40,7 @@ class Program
         };
 
 
-        Logger.Notice("UART Client started. LCD listening.");
+        Logger.Info("UART Client started. LCD listening.");
 
         while(true)
         {
