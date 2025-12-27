@@ -4,4 +4,3 @@ deploy.ps1
 /bin
 /bin/*
 /obj/*
-tools/*
