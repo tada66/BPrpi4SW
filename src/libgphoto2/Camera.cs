@@ -1,6 +1,7 @@
 using System;
 using System.Runtime.InteropServices;
 using System.Collections.Generic;
+using Microsoft.Extensions.Logging.Abstractions;
 
 public class Camera
 {
@@ -77,24 +78,24 @@ public class Camera
         private List<string>? _cachedValues;
         private readonly object _cacheLock = new();
 
+        private string Widget => _owner._interpreter.GetVariable("IsoWidget", "iso");
+
         public int value {
             get {
                 if (!_owner._interpreter.HasCapability("Configuration")) throw new NotSupportedException("Configuration capability is disabled.");
-                return int.TryParse(_owner._driver.GetWidgetInfo("iso")?.CurrentValue, out var v) ? v : 0;
+                return int.TryParse(_owner._driver.GetWidgetInfo(Widget)?.CurrentValue, out var v) ? v : 0;
             }
             set{
                 if (!_owner._interpreter.HasCapability("Configuration")) throw new NotSupportedException("Configuration capability is disabled.");
                 if(value < 0) throw new ArgumentOutOfRangeException(nameof(value), "ISO value cannot be negative.");
-                //if(!_owner.Iso.Values.Contains(value.ToString()))
-                //    throw new ArgumentException($"ISO value '{value}' is not supported by the camera.", nameof(value));
-                 _owner._driver.SetWidgetValueByPath("iso", value.ToString());
+                 _owner._driver.SetWidgetValueByPath(Widget, value.ToString());
             }
         }
 
         public int index {
             get {
                 if (!_owner._interpreter.HasCapability("Configuration")) throw new NotSupportedException("Configuration capability is disabled.");
-                var info = _owner._driver.GetWidgetInfo("iso");
+                var info = _owner._driver.GetWidgetInfo(Widget);
                 if (info?.Choices == null) return -1;
                 var cur = info.CurrentValue ?? "";
                 for (int i = 0; i < info.Choices.Count; i++)
@@ -103,7 +104,7 @@ public class Camera
             }
             set {
                 if (!_owner._interpreter.HasCapability("Configuration")) throw new NotSupportedException("Configuration capability is disabled.");
-                _owner._driver.SetWidgetValueByChoiceIndex("iso", value);
+                _owner._driver.SetWidgetValueByChoiceIndex(Widget, value);
             }
         }
 
@@ -116,7 +117,7 @@ public class Camera
                 lock (_cacheLock)
                 {
                     if (_cachedValues != null) return _cachedValues;
-                    var choices = _owner._driver.GetWidgetInfo("iso")?.Choices;
+                    var choices = _owner._driver.GetWidgetInfo(Widget)?.Choices;
                     _cachedValues = choices != null ? new List<string>(choices) : new List<string>();
                     return _cachedValues;
                 }
@@ -134,23 +135,23 @@ public class Camera
         private List<string>? _cachedValues;
         private readonly object _cacheLock = new();
 
+        private string Widget => _owner._interpreter.GetVariable("ShutterWidget", "shutterspeed");
+
         public string value {
             get {
                 if (!_owner._interpreter.HasCapability("Configuration")) throw new NotSupportedException("Configuration capability is disabled.");
-                return _owner._driver.GetWidgetInfo("shutterspeed")?.CurrentValue ?? "";
+                return _owner._driver.GetWidgetInfo(Widget)?.CurrentValue ?? "";
             }
             set { 
                 if (!_owner._interpreter.HasCapability("Configuration")) throw new NotSupportedException("Configuration capability is disabled.");
-                //if (!_owner.shutterSpeed.Values.Contains(value))
-                //    throw new ArgumentException($"Shutter Speed value '{value}' is not supported by the camera.", nameof(value));
-                _owner._driver.SetWidgetValueByPath("shutterspeed", value); 
-                }
+                _owner._driver.SetWidgetValueByPath(Widget, value); 
+            }
         }
 
         public int index {
             get {
                 if (!_owner._interpreter.HasCapability("Configuration")) throw new NotSupportedException("Configuration capability is disabled.");
-                var info = _owner._driver.GetWidgetInfo("shutterspeed");
+                var info = _owner._driver.GetWidgetInfo(Widget);
                 if (info?.Choices == null) return -1;
                 var cur = info.CurrentValue ?? "";
                 for (int i = 0; i < info.Choices.Count; i++)
@@ -159,7 +160,7 @@ public class Camera
             }
             set {
                 if (!_owner._interpreter.HasCapability("Configuration")) throw new NotSupportedException("Configuration capability is disabled.");
-                _owner._driver.SetWidgetValueByChoiceIndex("shutterspeed", value);
+                _owner._driver.SetWidgetValueByChoiceIndex(Widget, value);
             }
         }
 
@@ -169,7 +170,7 @@ public class Camera
                 if (_cachedValues != null) return _cachedValues;
                 lock (_cacheLock) {
                     if (_cachedValues != null) return _cachedValues;
-                    var choices = _owner._driver.GetWidgetInfo("shutterspeed")?.Choices;
+                    var choices = _owner._driver.GetWidgetInfo(Widget)?.Choices;
                     _cachedValues = choices != null ? new List<string>(choices) : new List<string>();
                     return _cachedValues;
                 }
@@ -185,23 +186,23 @@ public class Camera
         private List<string>? _cachedValues;
         private readonly object _cacheLock = new();
 
+        private string Widget => _owner._interpreter.GetVariable("ApertureWidget", "f-number");
+
         public string value {
             get {
                 if (!_owner._interpreter.HasCapability("Configuration")) throw new NotSupportedException("Configuration capability is disabled.");
-                return _owner._driver.GetWidgetInfo("f-number")?.CurrentValue ?? "";
+                return _owner._driver.GetWidgetInfo(Widget)?.CurrentValue ?? "";
             }
             set { 
                 if (!_owner._interpreter.HasCapability("Configuration")) throw new NotSupportedException("Configuration capability is disabled.");
-                //if (!_owner.aperture.Values.Contains(value) && !_owner.aperture.Values.Contains($"f/{value}") && !_owner.aperture.Values.Contains($"f{value}") && !_owner.aperture.Values.Contains($"f {value}"))
-                //    throw new ArgumentException($"Aperture value '{value}' is not supported by the camera.", nameof(value));
-                _owner._driver.SetWidgetValueByPath("f-number", value); 
-                }
+                _owner._driver.SetWidgetValueByPath(Widget, value); 
+            }
         }
 
         public int index {
             get {
                 if (!_owner._interpreter.HasCapability("Configuration")) throw new NotSupportedException("Configuration capability is disabled.");
-                var info = _owner._driver.GetWidgetInfo("f-number");
+                var info = _owner._driver.GetWidgetInfo(Widget);
                 if (info?.Choices == null) return -1;
                 var cur = info.CurrentValue ?? "";
                 for (int i = 0; i < info.Choices.Count; i++)
@@ -210,7 +211,7 @@ public class Camera
             }
             set {
                 if (!_owner._interpreter.HasCapability("Configuration")) throw new NotSupportedException("Configuration capability is disabled.");
-                _owner._driver.SetWidgetValueByChoiceIndex("f-number", value);
+                _owner._driver.SetWidgetValueByChoiceIndex(Widget, value);
             }
         }
 
@@ -220,7 +221,7 @@ public class Camera
                 if (_cachedValues != null) return _cachedValues;
                 lock (_cacheLock) {
                     if (_cachedValues != null) return _cachedValues;
-                    var choices = _owner._driver.GetWidgetInfo("f-number")?.Choices;
+                    var choices = _owner._driver.GetWidgetInfo(Widget)?.Choices;
                     _cachedValues = choices != null ? new List<string>(choices) : new List<string>();
                     return _cachedValues;
                 }
@@ -353,6 +354,8 @@ public class Camera
         return _driver.Capture(outputPath);
     }
 
+    // NOTE: This method will try to capture an image with the exposure time specified, but the actual exposure time may vary due to the camera's processing time and other factors
+    // For exposures shorter than 10 seconds use the CaptureImage method instead where the camera handles the exposure time internally, longer exposures can use this method as a half second tolerance doesnt matter
     public string CaptureImageBulb(float timeSec, string outputPath) {
         if (!_interpreter.HasCapability("TriggerCapture"))
             throw new NotSupportedException("Bulb/Trigger capture is not supported by the current camera configuration.");

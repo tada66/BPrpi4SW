@@ -18,6 +18,13 @@ internal class CameraCommandInterpreter
 
     public bool HasCapability(string name) => _capabilities.TryGetValue(name, out var v) && v;
 
+    /// <summary>
+    /// Gets a variable defined in config (e.g., DEFINE IsoWidget iso).
+    /// Returns the defaultValue if not defined.
+    /// </summary>
+    public string GetVariable(string name, string defaultValue = "") =>
+        _variables.TryGetValue(name, out var v) ? v : defaultValue;
+
     public void Clear()
     {
         _commands.Clear();

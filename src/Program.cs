@@ -32,7 +32,7 @@ class Program
             lcd.WritePos((float)x, (float)y, (float)z);
         };
 
-        uart.StatusReceived += (temp, x, y, z, enabled, paused, fanPct) => 
+        uart.StatusReceived += (temp, x, y, z, enabled, paused, celestialTracking, fanPct) => 
         {
             lcd.WritePos((float)x, (float)y, (float)z);
             string state = enabled ? (paused ? "   PAUSED" : "  RUNNING") : " DISABLED";
@@ -41,7 +41,7 @@ class Program
 
 
         Logger.Info("UART Client started. LCD listening.");
-
+        CameraTest();
         while(true)
         {
             try 
@@ -55,6 +55,7 @@ class Program
             }
         }
     }
+
 
 
     private static void CameraTest()
@@ -73,27 +74,26 @@ class Program
                 return;
             }
 
-            Console.WriteLine("Found cameras:");
             for (int i = 0; i < cameras.Count; i++)
             {
-                Console.WriteLine($"[{i}] {cameras[i].Model} on {cameras[i].Port}");
+                Logger.Debug($"[{i}] {cameras[i].Model} on {cameras[i].Port}");
             }
 
             // 2. Select the first one (or add logic to pick specific one)
             var selected = cameras[0]; 
-            Console.WriteLine($"Selecting: {selected.Model}");
+            Logger.Info($"Selecting: {selected.Model}");
             
             cam.ConnectCamera(selected);
-            Console.WriteLine($"Camera {cam.cameramodel} connected.");
+            Logger.Notice($"Camera {cam.cameramodel} connected.");
             // lcd.WriteStatus("Connected");
 
-            Console.WriteLine("--- CAMERA INFO ---");
-            Console.WriteLine($"Model: {cam.cameramodel}");
-            Console.WriteLine($"Manufacturer: {cam.manufacturer}");
-            Console.WriteLine($"Battery Level: {cam.batteryLevel}");
-            Console.WriteLine($"Focus Mode: {cam.focus.mode}");
-            Console.WriteLine($"Focus range: {string.Join(", ", cam.focus.GetManualFocusDriveRange() ?? (0,0,0))}");
-            Console.WriteLine("-------------------");
+            Logger.Debug("--- CAMERA INFO ---");
+            Logger.Debug($"Model: {cam.cameramodel}");
+            Logger.Debug($"Manufacturer: {cam.manufacturer}");
+            Logger.Debug($"Battery Level: {cam.batteryLevel}");
+            Logger.Debug($"Focus Mode: {cam.focus.mode}");
+            Logger.Debug($"Focus range: {string.Join(", ", cam.focus.GetManualFocusDriveRange() ?? (0,0,0))}");
+            Logger.Debug("-------------------");
             // lcd.WriteStatus(cam.cameramodel + " Ready");
             
             try {
@@ -101,7 +101,7 @@ class Program
                 Console.WriteLine($"ISO set to: {cam.Iso.value}, index: {cam.Iso.index}");
                 cam.shutterSpeed.value = "1/60";
                 Console.WriteLine($"Shutter Speed set to: {cam.shutterSpeed.value}, index: {cam.shutterSpeed.index}");
-                cam.aperture.value = "2.8";
+                cam.aperture.value = "8";
                 Console.WriteLine($"Aperture set to: {cam.aperture.value}, index: {cam.aperture.index}");
             } catch (Exception ex) {
                 Console.WriteLine($"Config warning: {ex.Message}");
@@ -109,35 +109,35 @@ class Program
             
 
 
-            //Console.WriteLine("Supported ISO values: " + string.Join(", ", cam.Iso.Values));
-            //Console.WriteLine("Supported Shutter Speed values: " + string.Join(", ", cam.shutterSpeed.Values));
-            //Console.WriteLine("Supported Aperture values: " + string.Join(", ", cam.aperture.Values));
+            Console.WriteLine("Supported ISO values: " + string.Join(", ", cam.Iso.Values));
+            Console.WriteLine("Supported Shutter Speed values: " + string.Join(", ", cam.shutterSpeed.Values));
+            Console.WriteLine("Supported Aperture values: " + string.Join(", ", cam.aperture.Values));
             Console.WriteLine("Camera configuration done.");
-            Console.WriteLine("Capturing image...");
-            cam.CaptureImage("NIKON_captured_image");
-            Console.WriteLine("Image captured.");
-            Console.WriteLine("Capturing bulb exposure (2s)...");
-            cam.shutterSpeed.value = "Bulb";
-            cam.CaptureImageBulb(2, "NIKONB");
-            Console.WriteLine("Bulb exposure captured.");
+            //Console.WriteLine("Capturing image...");
+            //cam.CaptureImage("NIKON_captured_image");
+            //Console.WriteLine("Image captured.");
+            //Console.WriteLine("Capturing bulb exposure (2s)...");
+            //cam.shutterSpeed.value = "Bulb";
+            //cam.CaptureImageBulb(2, "NIKONB");
+            //Console.WriteLine("Bulb exposure captured.");
 
             // Start Live View Streaming
             string targetHost = "10.0.0.20"; // PC IP
             int targetPort = 5000;
-            Console.WriteLine($"Starting Live View Stream to {targetHost}:{targetPort}...");
+            Logger.Notice($"Starting Live View Stream to {targetHost}:{targetPort}...");
             // lcd.WriteStatus("Streaming...");
             
             var sender = new TcpLiveViewSender(cam, targetHost, targetPort);
             sender.Start();
 
-            Console.WriteLine("Press Enter to exit...");
-            Console.ReadLine();
+            //Console.WriteLine("Press Enter to exit...");
+            //Console.ReadLine();
             
-            sender.Stop();
+            //sender.Stop();
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"Error: {ex.Message}");
+            Logger.Error($"Error: {ex.Message}");
             // lcd.WriteStatus("Error!");
             // lcd.WriteStatus(ex.Message);
         }
