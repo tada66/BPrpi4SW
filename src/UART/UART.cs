@@ -6,6 +6,8 @@ using System.Collections.Generic;
 using System.Threading.Tasks;
 using System.Drawing.Text;
 
+// This class made as a singleton according guide found here: https://csharpindepth.com/Articles/Singleton
+
 public static class Axis
 {
     public const byte X = 0;
@@ -13,23 +15,27 @@ public static class Axis
     public const byte Z = 2;
 }
 
-/// <summary>
-/// C# implementation of the UART communication protocol from commFINAL.py
-/// </summary>
 public sealed class UartClient : IDisposable
 {
+    // Singleton instance
+    private static readonly Lazy<UartClient> lazy =
+        new Lazy<UartClient>(() => new UartClient());
+    public static UartClient Client { get { return lazy.Value; } }
+
     private enum UartCommand : byte
     {
         CMD_ACK = 0x01,
         CMD_MOVE_STATIC = 0x10,
-        CMD_MOVE_TRACKING = 0x11,
-        CMD_PAUSE = 0x12,
-        CMD_RESUME = 0x13,
-        CMD_STOP = 0x14,
-        CMD_GETPOS = 0x20,
-        CMD_POSITION = 0x21,
-        CMD_STATUS = 0x22,
-        CMD_ESTOPTRIG = 0x30
+        CMD_MOVE_RELATIVE = 0x11,
+        CMD_MOVE_LINEAR = 0x12,
+        CMD_TRACK_CELESTIAL = 0x13,
+        CMD_STOP = 0x20,
+        CMD_PAUSE = 0x21,
+        CMD_RESUME = 0x22,
+        CMD_GETPOS = 0x30,
+        EVT_POSITION = 0x40,
+        EVT_STATUS = 0x41,
+        EVT_REFLOST = 0x42
     }
 
     private readonly SerialPort _port;
@@ -43,8 +49,8 @@ public sealed class UartClient : IDisposable
 
     // Events for received data
     public event Action<int, int, int>? PositionReceived;
-    public event Action<float, int, int, int, bool, bool, int>? StatusReceived;
-    //public event Action? EstopTriggered;
+    public event Action<float, int, int, int, bool, bool, bool, int>? StatusReceived;
+    public event Action? ReferenceLost;
 
     public UartClient(string? portName = null, int baudRate = 9600)
     {
@@ -154,9 +160,6 @@ public sealed class UartClient : IDisposable
 
     #region Send Commands
 
-    /// <summary>
-    /// Send a command and wait for ACK
-    /// </summary>
     private async Task<bool> SendCommandAsync(UartCommand cmd, byte[]? data = null, int timeoutMs = 2000, uint maxAttempts = 3)
     {
         data ??= Array.Empty<byte>();
@@ -264,13 +267,12 @@ public sealed class UartClient : IDisposable
                         // Reasonable frame size check
                         if (frame.Length > 50)
                         {
-                            Logger.Warn($"Oversized frame ({frame.Length} bytes) - likely corrupted");
-                            continue;
+                            Logger.Warn($"Oversized frame ({frame.Length} bytes) - corrupted?");
+                            //continue;
                         }
 
                         try
                         {
-                            Logger.Debug($"COBS frame received ({frame.Length} bytes): {hexStr}");
                             byte[] decoded = Cobs.Decode(frame);
                             Logger.Debug($"Decoded ({decoded.Length} bytes): {BitConverter.ToString(decoded).Replace("-", "")}");
                             ProcessBinaryMessage(decoded);
@@ -309,17 +311,32 @@ public sealed class UartClient : IDisposable
         byte msgId = decoded[1];
         byte dataLength = decoded[2];
 
-        // Verify message length
+        // Verify / normalize message length: some firmware frames report a smaller length but carry extra fields.
         if (decoded.Length != dataLength + 4)
         {
-            Logger.Warn($"Invalid message length: expected {dataLength + 4}, got {decoded.Length}, recovering");
-            return;
+            if (decoded.Length >= 4)
+            {
+                Logger.Warn($"Invalid message length: expected {dataLength + 4}, got {decoded.Length}, adjusting to frame length");
+                // Trust the actual frame size; recompute dataLength from it so we can parse best-effort.
+                dataLength = (byte)(decoded.Length - 4);
+            }
+            else
+            {
+                Logger.Warn($"Invalid message length: expected {dataLength + 4}, got {decoded.Length}, recovering");
+                return;
+            }
         }
 
         // Verify CRC
         byte receivedCrc = decoded[^1];
         byte calculatedCrc = CalculateCrc8(decoded, 0, decoded.Length - 1);
         bool crcValid = receivedCrc == calculatedCrc;
+        // Report CRC errors
+        if (!crcValid)
+        {
+            Logger.Warn($"CRC error in message ID {msgId} - CRC8 : 0x{receivedCrc:X2} ({(crcValid ? "Valid" : "INVALID")})");
+            return;
+        }
 
         // Check for invalid message ID
         if (msgId == 0x00)
@@ -337,7 +354,7 @@ public sealed class UartClient : IDisposable
             Array.Copy(decoded, 3, data, 0, dataLength);
 
         if (dataLength > 0)
-            Logger.Debug($"  DATA : {BitConverter.ToString(data).Replace("-", "")}");
+            Logger.Trace($"  DATA : {BitConverter.ToString(data).Replace("-", "")}");
 
         // Process specific message types
         var cmd = (UartCommand)cmdType;
@@ -352,7 +369,7 @@ public sealed class UartClient : IDisposable
                     if (_pendingAcks.TryRemove(ackedId, out var tcs))
                     {
                         tcs.TrySetResult(true);
-                        Logger.Debug($"  Message with ID={ackedId} marked as acknowledged");
+                        Logger.Trace($"  Message with ID={ackedId} marked as acknowledged");
                     }
                     else
                     {
@@ -360,8 +377,9 @@ public sealed class UartClient : IDisposable
                     }
                 }
                 break;
-            case UartCommand.CMD_STATUS:
-                if (dataLength >= 19)
+            case UartCommand.EVT_STATUS:
+                // Accept status with at least the known 20-byte payload; ignore any extra fields if present.
+                if (dataLength >= 20)
                 {
                     try
                     {
@@ -371,12 +389,14 @@ public sealed class UartClient : IDisposable
                         int z = BitConverter.ToInt32(data, 12);
                         bool enabled = data[16] != 0;
                         bool paused = data[17] != 0;
-                        int fanPct = data[18];
+                        bool celestialTracking = data[18] != 0;
+                        int fanPct = data[19];
 
                         string stateStr = $"{(enabled ? "ENABLED" : "DISABLED")}, {(paused ? "PAUSED" : "RUNNING")}";
-                        Console.WriteLine($"Status: Temp={temp:F2}°C, Positions: X={x}, Y={y}, Z={z} arcseconds, Motors: {stateStr}, Fan={fanPct}%");
+                        string celestialStr = celestialTracking ? "TRACKING" : "INACTIVE";
+                        Console.WriteLine($"Status: Temp={temp:F2}°C, Positions: X={x}, Y={y}, Z={z} arcseconds, Motors: {stateStr}, Celestial Tracking: {celestialStr}, Fan={fanPct}%, MSGID={msgId}");
                         
-                        StatusReceived?.Invoke(temp, x, y, z, enabled, paused, fanPct);
+                        StatusReceived?.Invoke(temp, x, y, z, enabled, paused, celestialTracking, fanPct);
                     }
                     catch (Exception e)
                     {
@@ -384,7 +404,7 @@ public sealed class UartClient : IDisposable
                     }
                 }
                 break;
-            case UartCommand.CMD_POSITION:
+            case UartCommand.EVT_POSITION:
                 if (dataLength >= 12)
                 {
                     try
@@ -402,25 +422,14 @@ public sealed class UartClient : IDisposable
                     }
                 }
                 break;
-            // ESTOP is broken on the pcb so it cannot be activated and thus tested, deactivated for now
-            // TODO: reactivate estop if a new pcb is made
-            /*case UartCommand.CMD_ESTOPTRIG:
-                Console.WriteLine("ESTOP TRIGGERED!");
-                EstopTriggered?.Invoke();
+            case UartCommand.EVT_REFLOST:
+                Logger.Warn("Reference lost event received from firmware! Must calibrate again for celestial tracking.");
+                ReferenceLost?.Invoke();
                 break;
-            */
+            
             default:
                 Logger.Warn($"[Warning] Received unknown command type: 0x{cmdType:X2}");
                 break;
-        }
-
-        Logger.Debug($"  CRC8 : 0x{receivedCrc:X2} ({(crcValid ? "Valid" : "INVALID")})");
-
-        // Report CRC errors
-        if (!crcValid)
-        {
-            Logger.Warn($"CRC error in message ID {msgId}");
-            return;
         }
 
         // Send ACK for valid non-ACK messages
@@ -470,15 +479,110 @@ public sealed class UartClient : IDisposable
         return SendCommandAsync(UartCommand.CMD_MOVE_STATIC, data);
     }
 
-    public Task<bool> StartTracking(float xRate, float yRate, float zRate)
+    public Task<bool> MoveRelative(byte axis, int deltaArcsec)
     {
-        Logger.Notice($"Starting tracking: X={xRate}, Y={yRate}, Z={zRate} arcsec/sec");
+        string axisName = axis switch { 0 => "X", 1 => "Y", 2 => "Z", _ => "Unknown" };
+        Logger.Notice($"Moving {axisName} axis by {deltaArcsec} arcseconds...");
+
+        var data = new byte[5];
+        data[0] = axis;
+        Array.Copy(BitConverter.GetBytes(deltaArcsec), 0, data, 1, 4);
+        return SendCommandAsync(UartCommand.CMD_MOVE_RELATIVE, data);
+    }
+
+    public Task<bool> StartLinearMove(float xRate, float yRate, float zRate)
+    {
+        Logger.Notice($"Starting linear move: X={xRate}, Y={yRate}, Z={zRate} arcsec/sec");
 
         var data = new byte[12];
         Array.Copy(BitConverter.GetBytes(xRate), 0, data, 0, 4);
         Array.Copy(BitConverter.GetBytes(yRate), 0, data, 4, 4);
         Array.Copy(BitConverter.GetBytes(zRate), 0, data, 8, 4);
-        return SendCommandAsync(UartCommand.CMD_MOVE_TRACKING, data);
+        return SendCommandAsync(UartCommand.CMD_MOVE_LINEAR, data);
+    }
+
+    /// <summary>
+    /// Start celestial tracking. The Pico will autonomously track the target RA/Dec.
+    /// </summary>
+    /// <param name="targetRA">Right Ascension in hours (0.0 to 24.0)</param>
+    /// <param name="targetDec">Declination in degrees (-90 to +90)</param>
+    /// <param name="alignMatrix">3x3 rotation matrix (9 floats, row-major) from alignment</param>
+    /// <param name="refTime">Unix timestamp (UTC) when tracking starts</param>
+    /// <param name="latitude">Observer latitude in degrees</param>
+    public Task<bool> StartCelestialTracking(float targetRA, float targetDec, float[] alignMatrix, long refTime, float latitude)
+    {
+        if (alignMatrix.Length != 9)
+            throw new ArgumentException("alignMatrix must have exactly 9 elements (3x3)", nameof(alignMatrix));
+
+        Logger.Notice($"Starting celestial tracking: RA={targetRA:F4}h, Dec={targetDec:F4}°, refTime={refTime}");
+
+        var data = new byte[56];
+        int offset = 0;
+
+        // targetRA (float, 4 bytes)
+        Array.Copy(BitConverter.GetBytes(targetRA), 0, data, offset, 4);
+        offset += 4;
+
+        // targetDec (float, 4 bytes)
+        Array.Copy(BitConverter.GetBytes(targetDec), 0, data, offset, 4);
+        offset += 4;
+
+        // alignMatrix (9 floats, 36 bytes)
+        for (int i = 0; i < 9; i++)
+        {
+            Array.Copy(BitConverter.GetBytes(alignMatrix[i]), 0, data, offset, 4);
+            offset += 4;
+        }
+
+        // refTime (uint64, 8 bytes)
+        Array.Copy(BitConverter.GetBytes((ulong)refTime), 0, data, offset, 8);
+        offset += 8;
+
+        // latitude (float, 4 bytes)
+        Array.Copy(BitConverter.GetBytes(latitude), 0, data, offset, 4);
+
+        return SendCommandAsync(UartCommand.CMD_TRACK_CELESTIAL, data);
+    }
+
+    /// <summary>
+    /// Test method: Start celestial tracking with identity matrix.
+    /// With identity matrix, mount coords = sky coords directly.
+    /// At RA=6h, Dec=45°, with 100x sidereal rate, the mount should:
+    /// - Z axis (pan): rotate continuously (RA motion)
+    /// - X axis (tilt): move toward 45° and vary as RA changes
+    /// - Y axis (roll): change for field rotation
+    /// </summary>
+    public Task<bool> TestCelestialTracking()
+    {
+        // Identity matrix: no transformation, sky coords = mount coords
+        float[] identityMatrix = new float[]
+        {
+            1f, 0f, 0f,
+            0f, 1f, 0f,
+            0f, 0f, 1f
+        };
+
+        // Target: RA=6h (90° from prime meridian), Dec=45° (mid-latitude in sky)
+        float targetRA = 6.0f;    // 6 hours
+        float targetDec = 45.0f;  // 45 degrees (so X axis will move!)
+
+        // Current Unix time
+        long refTime = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+
+        // Test latitude (e.g., 50° N for central Europe)
+        float latitude = 50.0f;
+
+        Logger.Notice("=== CELESTIAL TRACKING TEST ===");
+        Logger.Notice($"Target: RA={targetRA}h, Dec={targetDec}°");
+        Logger.Notice($"Matrix: Identity (no transformation)");
+        Logger.Notice($"RefTime: {refTime} (now)");
+        Logger.Notice($"Latitude: {latitude}°");
+        Logger.Notice("Expected behavior with 100x sidereal rate:");
+        Logger.Notice("  - Z axis (pan): rotate continuously (RA motion)");
+        Logger.Notice("  - X axis (tilt): move toward ~45° and oscillate (Dec=45°)");
+        Logger.Notice("  - Y axis (roll): change for field rotation");
+
+        return StartCelestialTracking(targetRA, targetDec, identityMatrix, refTime, latitude);
     }
 
     #endregion
@@ -495,8 +599,12 @@ public sealed class UartClient : IDisposable
         Console.WriteLine("x - Move X axis (absolute)");
         Console.WriteLine("y - Move Y axis (absolute)");
         Console.WriteLine("z - Move Z axis (absolute)");
+        Console.WriteLine("xr - Move axis X (relative)");
+        Console.WriteLine("yr - Move axis Y (relative)");
+        Console.WriteLine("zr - Move axis Z (relative)");
         Console.WriteLine("p - Get current positions (all axes)");
-        Console.WriteLine("t - Start tracking mode");
+        Console.WriteLine("l - Start linear move");
+        Console.WriteLine("c - Test celestial tracking (100x speed)");
         Console.WriteLine("h - Show this help");
         Console.WriteLine("q - Quit");
     }
@@ -539,7 +647,27 @@ public sealed class UartClient : IDisposable
                 case "5":
                     await StopAll();
                     break;
-
+                case "xr":
+                    Console.Write("Enter X delta (arcseconds): ");
+                    if (int.TryParse(Console.ReadLine(), out int xDelta))
+                        await MoveRelative(Axis.X, xDelta);
+                    else
+                        Console.WriteLine("Invalid delta.");
+                    break;
+                case "yr":
+                    Console.Write("Enter Y delta (arcseconds): ");
+                    if (int.TryParse(Console.ReadLine(), out int yDelta))
+                        await MoveRelative(Axis.Y, yDelta);
+                    else
+                        Console.WriteLine("Invalid delta.");
+                    break;
+                case "zr":
+                    Console.Write("Enter Z delta (arcseconds): ");
+                    if (int.TryParse(Console.ReadLine(), out int zDelta))
+                        await MoveRelative(Axis.Z, zDelta);
+                    else
+                        Console.WriteLine("Invalid delta.");
+                    break;
                 case "x":
                     Console.Write("Enter X position (arcseconds): ");
                     if (int.TryParse(Console.ReadLine(), out int xPos))
@@ -568,14 +696,18 @@ public sealed class UartClient : IDisposable
                     await GetPositions();
                     break;
 
-                case "t":
+                case "l":
                     Console.Write("Enter X rate (arcsec/sec): ");
                     if (!float.TryParse(Console.ReadLine(), out float xRate)) { Console.WriteLine("Invalid."); break; }
                     Console.Write("Enter Y rate (arcsec/sec): ");
                     if (!float.TryParse(Console.ReadLine(), out float yRate)) { Console.WriteLine("Invalid."); break; }
                     Console.Write("Enter Z rate (arcsec/sec): ");
                     if (!float.TryParse(Console.ReadLine(), out float zRate)) { Console.WriteLine("Invalid."); break; }
-                    await StartTracking(xRate, yRate, zRate);
+                    await StartLinearMove(xRate, yRate, zRate);
+                    break;
+
+                case "c":
+                    await TestCelestialTracking();
                     break;
 
                 default:
