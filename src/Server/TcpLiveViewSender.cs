@@ -167,10 +167,8 @@ public class TcpLiveViewSender
                     break;
                 case "capture":
                     // Capture image with current settings
-                    string captureDir = "/home/pi/captures";
-                    Directory.CreateDirectory(captureDir);
                     string timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
-                    string path = $"{captureDir}/img_{timestamp}";
+                    string path = $"img_{timestamp}";
                     Logger.Info($"Capturing image to {path}...");
                     string result = _camera.CaptureImage(path);
                     Logger.Info($"Capture complete: {result}");
@@ -178,10 +176,8 @@ public class TcpLiveViewSender
                 case "capture_bulb":
                     // Capture bulb exposure
                     if (float.TryParse(cmd.Value, out float bulbTime)) {
-                        string bulbDir = "/home/pi/captures";
-                        Directory.CreateDirectory(bulbDir);
                         string ts = DateTime.Now.ToString("yyyyMMdd_HHmmss");
-                        string bulbPath = $"{bulbDir}/bulb_{ts}_{bulbTime}s";
+                        string bulbPath = $"bulb_{ts}_{bulbTime}s";
                         Logger.Info($"Starting {bulbTime}s bulb capture to {bulbPath}...");
                         string resultB = _camera.CaptureImageBulb(bulbTime, bulbPath);
                         Logger.Info($"Bulb capture complete: {resultB}");

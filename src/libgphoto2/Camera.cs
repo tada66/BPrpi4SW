@@ -14,6 +14,9 @@ public class Camera
     public FocusProperty focus { get; }
 
     private bool _liveViewActive = false;
+    
+    // Synchronization for capture vs live view
+    private readonly object _cameraLock = new();
 
     public Camera()
     {
@@ -346,12 +349,16 @@ public class Camera
     public string CaptureImage(string outputPath) {
         if (!_interpreter.HasCapability("ImageCapture"))
             throw new NotSupportedException("Image capture is not supported by the current camera configuration.");
-        if (_liveViewActive) {
-            //TODO: CHECK ON A DSLR HOW THIS ACTUALLY WORKS
-            _interpreter.Execute("StopLiveView");
-            _liveViewActive = false;
+        
+        lock (_cameraLock)
+        {
+            if (_liveViewActive) {
+                _interpreter.Execute("StopLiveView");
+                _liveViewActive = false;
+                Thread.Sleep(200); // Give camera time to exit live view
+            }
+            return _driver.Capture(outputPath);
         }
-        return _driver.Capture(outputPath);
     }
 
     // NOTE: This method will try to capture an image with the exposure time specified, but the actual exposure time may vary due to the camera's processing time and other factors
@@ -361,33 +368,37 @@ public class Camera
             throw new NotSupportedException("Bulb/Trigger capture is not supported by the current camera configuration.");
         if (timeSec < 0) throw new ArgumentOutOfRangeException(nameof(timeSec), "Time cannot be negative.");
 
-        if (_liveViewActive) {
-            //TODO: CHECK ON A DSLR HOW THIS ACTUALLY WORKS
-            _interpreter.Execute("StopLiveView");
-            _liveViewActive = false;
-        }
-
-        _interpreter.Execute("StartBulb");
-        Thread.Sleep((int)(timeSec * 1000));
-        _interpreter.Execute("StopBulb");
-        Logger.Info("Capture complete, waiting for image to be available...");
-
-        int maxWait = 30000; // 30 seconds timeout
-        int elapsed = 0;
-        while (elapsed < maxWait)
+        lock (_cameraLock)
         {
-            var cameraPath = _driver.WaitForImage(1000); // Wait 1s at a time
-            if (cameraPath != null)
-            {
-                string extension = System.IO.Path.GetExtension(cameraPath).ToLower();
-                string folder = System.IO.Path.GetDirectoryName(cameraPath)?.Replace("\\", "/") ?? "/";
-                string filename = System.IO.Path.GetFileName(cameraPath);
-                _driver.DownloadFile(folder, filename, outputPath + extension);
-                return outputPath + extension;
+            if (_liveViewActive) {
+                _interpreter.Execute("StopLiveView");
+                _liveViewActive = false;
+                Thread.Sleep(200); // Give camera time to exit live view
             }
-            elapsed += 1000;
+
+            _interpreter.Execute("StartBulb");
+            Thread.Sleep((int)(timeSec * 1000));
+            _interpreter.Execute("StopBulb");
+            Logger.Info("Capture complete, waiting for image to be available...");
+
+            int maxWait = 60000; // 60 seconds timeout
+            int elapsed = 0;
+            while (elapsed < maxWait)
+            {
+                var cameraPath = _driver.WaitForImage(1000); // Wait 1s at a time
+                if (cameraPath != null)
+                {
+                    string extension = System.IO.Path.GetExtension(cameraPath).ToLower();
+                    string folder = System.IO.Path.GetDirectoryName(cameraPath)?.Replace("\\", "/") ?? "/";
+                    string filename = System.IO.Path.GetFileName(cameraPath);
+                    _driver.DownloadFile(folder, filename, outputPath + extension);
+                    return outputPath + extension;
+                }
+                elapsed += 1000;
+            }
+            Logger.Error("Timeout waiting for image to be saved by camera.");
+            throw new TimeoutException("Timed out waiting for image to be saved by camera.");
         }
-        throw new TimeoutException("Timed out waiting for image to be saved by camera.");
     }
 
 
@@ -398,13 +409,24 @@ public class Camera
     public byte[] GetLiveViewBytes() {
         if (!_interpreter.HasCapability("LiveView"))
             throw new NotSupportedException("Live View is not supported by the current camera configuration.");
-
-        if (!_liveViewActive) {
-            //TODO: CHECK ON A DSLR HOW THIS ACTUALLY WORKS
-            _interpreter.Execute("StartLiveView");
-            _liveViewActive = true;
+        
+        // Try to acquire lock - if capture is happening, return empty immediately
+        // This prevents USB conflicts between capture and preview
+        if (!Monitor.TryEnter(_cameraLock, 0))
+            return Array.Empty<byte>();
+        
+        try
+        {
+            if (!_liveViewActive) {
+                _interpreter.Execute("StartLiveView");
+                _liveViewActive = true;
+            }
+            return _driver.CapturePreviewBytes();
         }
-        return _driver.CapturePreviewBytes();
+        finally
+        {
+            Monitor.Exit(_cameraLock);
+        }
     }
     
     public void SaveLiveView(string path) {

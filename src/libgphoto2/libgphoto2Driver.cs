@@ -439,8 +439,54 @@ internal class libgphoto2Driver
             {
                 if (file != IntPtr.Zero) gp_file_free(file);
             }
+            DrainEventQueue(3000);
         }
         return filename;
+    }
+
+    private void DrainEventQueue(int maxWaitMs)
+    {
+        var startTime = DateTime.UtcNow;
+        IntPtr eventData = IntPtr.Zero;
+        
+        while (true)
+        {
+            int elapsed = (int)(DateTime.UtcNow - startTime).TotalMilliseconds;
+            if (elapsed >= maxWaitMs) break;
+            
+            int waitTime = Math.Min(200, maxWaitMs - elapsed);
+            if (waitTime <= 0) waitTime = 1;
+            
+            try
+            {
+                int result = gp_camera_wait_for_event(_cam, waitTime, out var eventType, out eventData, _ctx);
+                if (result < 0) break; // Error, stop draining
+                
+                if (eventType == CameraEventType.GP_EVENT_TIMEOUT)
+                    break; // Queue is empty
+                    
+                if (eventType == CameraEventType.GP_EVENT_CAPTURE_COMPLETE)
+                {
+                    // Capture complete, wait a tiny bit more for any final events
+                    maxWaitMs = Math.Min(maxWaitMs, elapsed + 200);
+                }
+                
+                // For FILE_ADDED events, reset timer to allow more data
+                if (eventType == CameraEventType.GP_EVENT_FILE_ADDED)
+                {
+                    startTime = DateTime.UtcNow;
+                    maxWaitMs = 1000; // Reset to 1 second wait
+                }
+            }
+            finally
+            {
+                if (eventData != IntPtr.Zero)
+                {
+                    free(eventData);
+                    eventData = IntPtr.Zero;
+                }
+            }
+        }
     }
 
     internal IReadOnlyList<string> ListWidgets()
