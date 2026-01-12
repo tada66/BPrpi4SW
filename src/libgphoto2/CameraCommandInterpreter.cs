@@ -39,8 +39,7 @@ internal class CameraCommandInterpreter
     {
         if (!File.Exists(filePath))
         {
-            // It's okay if a specific config doesn't exist, just log it
-            // Console.WriteLine($"Info: Command file not found at {filePath}");
+            Logger.Notice($"Command file not found at {filePath}");
             return;
         }
 
@@ -91,14 +90,14 @@ internal class CameraCommandInterpreter
                 }
             }
         }
-        Console.WriteLine($"Loaded {_commands.Count} commands, {_variables.Count} variables, {_capabilities.Count} capabilities from {filePath}");
+        Logger.Info($"Loaded {_commands.Count} commands, {_variables.Count} variables, {_capabilities.Count} capabilities from {filePath}");
     }
 
     public void Execute(string commandName, params object[] args)
     {
         if (!_commands.TryGetValue(commandName, out var instructions))
         {
-            Console.WriteLine($"Command '{commandName}' not found.");
+            Logger.Warn($"Command '{commandName}' not found.");
             return;
         }
 

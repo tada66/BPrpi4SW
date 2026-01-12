@@ -1,4 +1,5 @@
 using System;
+using System.IO;
 using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
@@ -40,10 +41,10 @@ public class TcpLiveViewSender
             try
             {
                 using var client = new TcpClient();
-                Console.WriteLine($"Connecting to {_host}:{_port}...");
+                Logger.Info($"Connecting to {_host}:{_port}...");
                 client.Connect(_host, _port);
                 using var stream = client.GetStream();
-                Console.WriteLine("Connected. Streaming live view...");
+                Logger.Info("Connected. Streaming live view...");
 
                 int frameCount = 0;
 
@@ -77,19 +78,19 @@ public class TcpLiveViewSender
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Streaming error: {ex.Message}");
+                Logger.Error($"Streaming error: {ex.Message}");
 
                 // If camera disconnected (GP_ERROR_IO_USB_FIND) or not found (GP_ERROR_MODEL_NOT_FOUND), 
                 // shutdown driver and clear specific port so we can try to auto-detect on re-init
                 if (ex.Message.Contains("GP_ERROR_IO_USB_FIND") || ex.Message.Contains("GP_ERROR_MODEL_NOT_FOUND"))
                 {
-                    Console.WriteLine("Camera lost or not found. Resetting connection state...");
+                    Logger.Notice("Camera lost or not found. Resetting connection state...");
                     try 
                     { 
                         _camera.Shutdown();
                         _camera.ClearSelectedCamera(); 
                     } 
-                    catch (Exception shutdownEx) { Console.WriteLine($"Shutdown error: {shutdownEx.Message}"); }
+                    catch (Exception shutdownEx) { Logger.Error($"Shutdown error: {shutdownEx.Message}"); }
                 }
 
                 Thread.Sleep(1000); // Retry delay
@@ -130,13 +131,13 @@ public class TcpLiveViewSender
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"Error handling command: {ex.Message}");
+            Logger.Error($"Error handling command: {ex.Message}");
         }
     }
 
     private void ExecuteCommand(CommandPacket cmd)
     {
-        Console.WriteLine($"Executing command: {cmd.Action} {cmd.Value}");
+        Logger.Info($"Executing command: {cmd.Action} {cmd.Value}");
         try
         {
             switch (cmd.Action)
@@ -164,11 +165,35 @@ public class TcpLiveViewSender
                     if (int.TryParse(cmd.Value, out int stepFurther)) _camera.focus.Further(stepFurther);
                     else _camera.focus.Further(2); // Default step
                     break;
+                case "capture":
+                    // Capture image with current settings
+                    string captureDir = "/home/pi/captures";
+                    Directory.CreateDirectory(captureDir);
+                    string timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
+                    string path = $"{captureDir}/img_{timestamp}";
+                    Logger.Info($"Capturing image to {path}...");
+                    string result = _camera.CaptureImage(path);
+                    Logger.Info($"Capture complete: {result}");
+                    break;
+                case "capture_bulb":
+                    // Capture bulb exposure
+                    if (float.TryParse(cmd.Value, out float bulbTime)) {
+                        string bulbDir = "/home/pi/captures";
+                        Directory.CreateDirectory(bulbDir);
+                        string ts = DateTime.Now.ToString("yyyyMMdd_HHmmss");
+                        string bulbPath = $"{bulbDir}/bulb_{ts}_{bulbTime}s";
+                        Logger.Info($"Starting {bulbTime}s bulb capture to {bulbPath}...");
+                        string resultB = _camera.CaptureImageBulb(bulbTime, bulbPath);
+                        Logger.Info($"Bulb capture complete: {resultB}");
+                    } else {
+                        Logger.Warn($"Invalid bulb time: {cmd.Value}");
+                    }
+                    break;
             }
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"Failed to execute command: {ex.Message}");
+            Logger.Error($"Failed to execute command: {ex.Message}");
         }
     }
 
@@ -188,7 +213,7 @@ public class TcpLiveViewSender
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"Error sending metadata: {ex.Message}");
+            Logger.Error($"Error sending metadata: {ex.Message}");
         }
     }
 

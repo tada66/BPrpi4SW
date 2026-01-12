@@ -280,7 +280,7 @@ public class Camera
              string modelPath = System.IO.Path.Combine(baseDir, "specific", $"{model}.conf");
              if (System.IO.File.Exists(modelPath))
              {
-                 Console.WriteLine($"Loading config: {modelPath}");
+                 Logger.Info($"Loading config: {modelPath}");
                  _interpreter.Load(modelPath);
                  return;
              }
@@ -293,7 +293,7 @@ public class Camera
             string makePath = System.IO.Path.Combine(baseDir, "specific", $"{make}_default.conf");
             if (System.IO.File.Exists(makePath))
             {
-                Console.WriteLine($"Loading config: {makePath}");
+                Logger.Info($"Loading config: {makePath}");
                 _interpreter.Load(makePath);
                 return;
             }
@@ -304,13 +304,13 @@ public class Camera
                 string simpleMakePath = System.IO.Path.Combine(baseDir, "specific", $"{simpleMake}_default.conf");
                 if (System.IO.File.Exists(simpleMakePath))
                 {
-                    Console.WriteLine($"Loading config: {simpleMakePath}");
+                    Logger.Info($"Loading config: {simpleMakePath}");
                     _interpreter.Load(simpleMakePath);
                     return;
                 }
                 else
                 {
-                    Console.WriteLine($"No specific config found for make: {simpleMakePath}");
+                    Logger.Warn($"No specific config found for make: {simpleMakePath}");
                 }
             }
         }
@@ -319,12 +319,12 @@ public class Camera
         string defaultPath = System.IO.Path.Combine(baseDir, "default_commands.conf");
         if (System.IO.File.Exists(defaultPath))
         {
-            Console.WriteLine($"Loading config: {defaultPath}");
+            Logger.Info($"Loading config: {defaultPath}");
             _interpreter.Load(defaultPath);
         }
         else
         {
-            Console.WriteLine("Warning: No configuration file found.");
+            Logger.Warn("Warning: No configuration file found.");
         }
     }
 
@@ -370,7 +370,7 @@ public class Camera
         _interpreter.Execute("StartBulb");
         Thread.Sleep((int)(timeSec * 1000));
         _interpreter.Execute("StopBulb");
-        Console.WriteLine("Capture complete, waiting for image to be available...");
+        Logger.Info("Capture complete, waiting for image to be available...");
 
         int maxWait = 30000; // 30 seconds timeout
         int elapsed = 0;

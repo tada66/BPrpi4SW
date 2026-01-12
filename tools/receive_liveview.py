@@ -45,8 +45,8 @@ class LiveViewApp:
         self.video_label.pack(fill=tk.BOTH, expand=True)
 
         # Controls
-        self.create_control_group("ISO", "set_iso", ["100", "200", "400", "800", "1600", "3200", "6400"])
-        self.create_control_group("Shutter", "set_shutter", ["1/30", "1/60", "1/125", "1/250", "1/500"])
+        self.create_control_group("ISO", "set_iso", ["100", "200", "400", "800", "1600", "3200", "6400", "12800", "25600", "51200"])
+        self.create_control_group("Shutter", "set_shutter", ["1/4", "1/8", "1/15", "1/30", "1/60", "1/125", "1/250", "1/500"])
         self.create_control_group("Aperture", "set_aperture", ["1.8", "2.8", "4.0", "5.6", "8.0"])
 
         # Magnify
@@ -69,6 +69,21 @@ class LiveViewApp:
         
         btn_far = ttk.Button(focus_frame, text="Far >>>", command=lambda: self.send_command("focus_further", self.focus_step.get()))
         btn_far.pack(fill='x', pady=2)
+
+        # Capture
+        ttk.Separator(self.controls, orient='horizontal').pack(fill='x', pady=10)
+        capture_frame = ttk.LabelFrame(self.controls, text="Capture", padding=5)
+        capture_frame.pack(fill='x', pady=5)
+        
+        btn_capture = ttk.Button(capture_frame, text="Capture Image", command=lambda: self.send_command("capture", ""))
+        btn_capture.pack(fill='x', pady=2)
+        
+        ttk.Label(capture_frame, text="Bulb Time (sec):").pack(anchor='w')
+        self.bulb_time = tk.StringVar(value="30")
+        ttk.Entry(capture_frame, textvariable=self.bulb_time).pack(fill='x', pady=2)
+        
+        btn_bulb = ttk.Button(capture_frame, text="Capture Bulb", command=lambda: self.send_command("capture_bulb", self.bulb_time.get()))
+        btn_bulb.pack(fill='x', pady=2)
 
         # Status
         ttk.Separator(self.controls, orient='horizontal').pack(fill='x', pady=10)
@@ -188,8 +203,24 @@ class LiveViewApp:
             # Convert to RGB (OpenCV is BGR)
             img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
             
-            # Resize to fit window (optional, simple scaling)
+            # Draw crosshair in center
             h, w, _ = img.shape
+            center_x, center_y = w // 2, h // 2
+            
+            # Crosshair color: bright cyan/green
+            color = (0, 255, 0)  # Green in RGB
+            thickness = 2
+            length = 40  # Length of each line from center
+            gap = 5  # Gap from center to keep it transparent
+            
+            # Draw horizontal line (with gap in center)
+            cv2.line(img, (center_x - length, center_y), (center_x - gap, center_y), color, thickness)
+            cv2.line(img, (center_x + gap, center_y), (center_x + length, center_y), color, thickness)
+            # Draw vertical line (with gap in center)
+            cv2.line(img, (center_x, center_y - length), (center_x, center_y - gap), color, thickness)
+            cv2.line(img, (center_x, center_y + gap), (center_x, center_y + length), color, thickness)
+            
+            # Resize to fit window (optional, simple scaling)
             # display_w = self.video_panel.winfo_width()
             # display_h = self.video_panel.winfo_height()
             # if display_w > 10 and display_h > 10:

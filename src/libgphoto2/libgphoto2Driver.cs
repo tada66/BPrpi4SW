@@ -226,6 +226,7 @@ internal class libgphoto2Driver
         if (code < 0) 
         {
             var errorName = Enum.IsDefined(typeof(GPResult), code) ? ((GPResult)code).ToString() : "Unknown Error";
+            Logger.Error($"{where} failed: {ResultString(code)} ({errorName} / {code})");
             throw new InvalidOperationException($"{where} failed: {ResultString(code)} ({errorName} / {code})");
         }
     }
@@ -310,7 +311,7 @@ internal class libgphoto2Driver
                     _lockedSerial = GetWidgetValueByPath("serialnumber") ?? GetWidgetValueByPath("eosserialnumber");
                     if (!string.IsNullOrEmpty(_lockedSerial))
                     {
-                        Console.WriteLine($"[Driver] Locked to camera serial: {_lockedSerial}");
+                        Logger.Notice($"[Driver] Locked to camera serial: {_lockedSerial}");
                     }
                 }
                 
