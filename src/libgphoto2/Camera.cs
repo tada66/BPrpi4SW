@@ -381,11 +381,11 @@ public class Camera
             _interpreter.Execute("StopBulb");
             Logger.Info("Capture complete, waiting for image to be available...");
 
-            int maxWait = 60000; // 60 seconds timeout
+            int maxWait = 120000; // 120 seconds timeout
             int elapsed = 0;
             while (elapsed < maxWait)
             {
-                var cameraPath = _driver.WaitForImage(1000); // Wait 1s at a time
+                var cameraPath = _driver.WaitForImage(2000); // Wait 2s at a time
                 if (cameraPath != null)
                 {
                     string extension = System.IO.Path.GetExtension(cameraPath).ToLower();
@@ -394,7 +394,7 @@ public class Camera
                     _driver.DownloadFile(folder, filename, outputPath + extension);
                     return outputPath + extension;
                 }
-                elapsed += 1000;
+                elapsed += 2000;
             }
             Logger.Error("Timeout waiting for image to be saved by camera.");
             throw new TimeoutException("Timed out waiting for image to be saved by camera.");
