@@ -394,7 +394,7 @@ public sealed class UartClient : IDisposable
 
                         string stateStr = $"{(enabled ? "ENABLED" : "DISABLED")}, {(paused ? "PAUSED" : "RUNNING")}";
                         string celestialStr = celestialTracking ? "TRACKING" : "INACTIVE";
-                        Console.WriteLine($"Status: Temp={temp:F2}°C, Positions: X={x}, Y={y}, Z={z} arcseconds, Motors: {stateStr}, Celestial Tracking: {celestialStr}, Fan={fanPct}%, MSGID={msgId}");
+                        Logger.Info($"Status: Temp={temp:F2}°C, Positions: X={x}, Y={y}, Z={z} arcseconds, Motors: {stateStr}, Celestial Tracking: {celestialStr}, Fan={fanPct}%, MSGID={msgId}");
                         
                         StatusReceived?.Invoke(temp, x, y, z, enabled, paused, celestialTracking, fanPct);
                     }
@@ -544,47 +544,6 @@ public sealed class UartClient : IDisposable
         return SendCommandAsync(UartCommand.CMD_TRACK_CELESTIAL, data);
     }
 
-    /// <summary>
-    /// Test method: Start celestial tracking with identity matrix.
-    /// With identity matrix, mount coords = sky coords directly.
-    /// At RA=6h, Dec=45°, with 100x sidereal rate, the mount should:
-    /// - Z axis (pan): rotate continuously (RA motion)
-    /// - X axis (tilt): move toward 45° and vary as RA changes
-    /// - Y axis (roll): change for field rotation
-    /// </summary>
-    public Task<bool> TestCelestialTracking()
-    {
-        // Identity matrix: no transformation, sky coords = mount coords
-        float[] identityMatrix = new float[]
-        {
-            1f, 0f, 0f,
-            0f, 1f, 0f,
-            0f, 0f, 1f
-        };
-
-        // Target: RA=6h (90° from prime meridian), Dec=45° (mid-latitude in sky)
-        float targetRA = 6.0f;    // 6 hours
-        float targetDec = 45.0f;  // 45 degrees (so X axis will move!)
-
-        // Current Unix time
-        long refTime = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
-
-        // Test latitude (e.g., 50° N for central Europe)
-        float latitude = 50.0f;
-
-        Logger.Notice("=== CELESTIAL TRACKING TEST ===");
-        Logger.Notice($"Target: RA={targetRA}h, Dec={targetDec}°");
-        Logger.Notice($"Matrix: Identity (no transformation)");
-        Logger.Notice($"RefTime: {refTime} (now)");
-        Logger.Notice($"Latitude: {latitude}°");
-        Logger.Notice("Expected behavior with 100x sidereal rate:");
-        Logger.Notice("  - Z axis (pan): rotate continuously (RA motion)");
-        Logger.Notice("  - X axis (tilt): move toward ~45° and oscillate (Dec=45°)");
-        Logger.Notice("  - Y axis (roll): change for field rotation");
-
-        return StartCelestialTracking(targetRA, targetDec, identityMatrix, refTime, latitude);
-    }
-
     #endregion
 
     #region Interactive Mode
@@ -604,7 +563,7 @@ public sealed class UartClient : IDisposable
         Console.WriteLine("zr - Move axis Z (relative)");
         Console.WriteLine("p - Get current positions (all axes)");
         Console.WriteLine("l - Start linear move");
-        Console.WriteLine("c - Test celestial tracking (100x speed)");
+        Console.WriteLine("a - Star alignment mode (interactive 2-star alignment)");
         Console.WriteLine("h - Show this help");
         Console.WriteLine("q - Quit");
     }
@@ -706,8 +665,8 @@ public sealed class UartClient : IDisposable
                     await StartLinearMove(xRate, yRate, zRate);
                     break;
 
-                case "c":
-                    await TestCelestialTracking();
+                case "a":
+                    await Alignment.InteractiveAlignmentTest();
                     break;
 
                 default:

@@ -9,7 +9,7 @@ class Program
 {
     static async Task Main()
     {
-        Logger.Debug("Program started");
+        Logger.Notice("Program started.");
         using var lcd = new LcdController();
         lcd.WriteStatus("Program Starting...");
         
@@ -39,6 +39,8 @@ class Program
 
 
         Logger.Info("UART Client started. LCD listening.");
+        Logger.Notice("Please note that the original position of the device (0,0,0) is not necessarily the 'home' position. It is simply the position at which the device was powered on. The device must be calibrated to know it's actual position.");
+        Logger.Notice("Also note that in case motors are disabled (not paused, but disabled), any calibration is LOST! Reported position will not match any previous readings and device must be recalibrated.");
         CameraTest();
         while(true)
         {
@@ -90,30 +92,11 @@ class Program
             Logger.Debug($"Camera Focus Mode: {cam.focus.mode}");
             Logger.Debug($"Camera Focus range: {string.Join(", ", cam.focus.GetManualFocusDriveRange() ?? (0,0,0))}");
             
-            /*try {
-                cam.Iso.value = 1250;
-                Logger.Debug($"ISO set to: {cam.Iso.value}, index: {cam.Iso.index}");
-                cam.shutterSpeed.value = "1/60";
-                Logger.Debug($"Shutter Speed set to: {cam.shutterSpeed.value}, index: {cam.shutterSpeed.index}");
-                cam.aperture.value = "8";
-                Logger.Debug($"Aperture set to: {cam.aperture.value}, index: {cam.aperture.index}");
-            } catch (Exception ex) {
-                Logger.Warn($"Config warning: {ex.Message}");
-            }*/
-            
-
 
             Logger.Info("Supported ISO values: " + string.Join(", ", cam.Iso.Values));
             Logger.Info("Supported Shutter Speed values: " + string.Join(", ", cam.shutterSpeed.Values));
             Logger.Info("Supported Aperture values: " + string.Join(", ", cam.aperture.Values));
             Logger.Info("Camera configuration done.");
-            //Console.WriteLine("Capturing image...");
-            //cam.CaptureImage("NIKON_captured_image");
-            //Console.WriteLine("Image captured.");
-            //Console.WriteLine("Capturing bulb exposure (2s)...");
-            //cam.shutterSpeed.value = "Bulb";
-            //cam.CaptureImageBulb(2, "NIKONB");
-            //Console.WriteLine("Bulb exposure captured.");
 
             // Start Live View Streaming
             string targetHost = "10.0.0.20"; // PC IP
@@ -122,6 +105,7 @@ class Program
             
             var sender = new TcpLiveViewSender(cam, targetHost, targetPort);
             sender.Start();
+              
 
             //Console.WriteLine("Press Enter to exit...");
             //Console.ReadLine();
