@@ -15,6 +15,7 @@
 
   <ItemGroup>
     <PackageReference Include="Iot.Device.Bindings" Version="4.0.1" />
+    <PackageReference Include="MetadataExtractor" Version="2.9.0" />
     <PackageReference Include="System.Device.Gpio" Version="4.0.1" />
   </ItemGroup>
 

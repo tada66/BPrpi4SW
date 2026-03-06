@@ -33,14 +33,16 @@ public class Camera
         private readonly Camera _owner;
         internal FocusProperty(Camera owner) { _owner = owner; }
 
+        private string FocusModeWidget => _owner._interpreter.GetVariable("FocusModeWidget", "focusmode");
+
         public string mode
         {
-            get => _owner._driver.GetWidgetInfo("focusmode")?.CurrentValue ?? "UNKNOWN";
+            get => _owner._driver.GetWidgetInfo(FocusModeWidget)?.CurrentValue ?? "UNKNOWN";
             set
             {
                 if (!_owner.focus.Values.Contains(value))
                     throw new ArgumentException($"Focus Mode value '{value}' is not supported by the camera.", nameof(value));
-                _owner._driver.SetWidgetValueByPath("focusmode", value);
+                _owner._driver.SetWidgetValueByPath(FocusModeWidget, value);
             }
         }
 
@@ -48,7 +50,7 @@ public class Camera
         {
             get
             {
-                var choices = _owner._driver.GetWidgetInfo("focusmode")?.Choices;
+                var choices = _owner._driver.GetWidgetInfo(FocusModeWidget)?.Choices;
                 return choices != null ? new List<string>(choices) : new List<string>();
             }
         }

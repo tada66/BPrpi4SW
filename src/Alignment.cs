@@ -32,6 +32,31 @@ public static class Alignment
         public float Magnitude { get; set; }
     }
 
+    /// <summary>
+    /// Result from an alignment computation, containing quality metrics and per-star diagnostics.
+    /// </summary>
+    public class AlignmentResult
+    {
+        public string Quality { get; set; } = "NOT_ALIGNED";
+        public double AverageResidualArcmin { get; set; }
+        public double AverageResidualPixels { get; set; }
+        public double MaxPairErrorDeg { get; set; }
+        public double StepLossPercent { get; set; }
+        public int ActiveStarCount { get; set; }
+        public int RejectedCount { get; set; }
+        public List<StarResidualInfo> Stars { get; set; } = new();
+    }
+
+    public class StarResidualInfo
+    {
+        public int Index { get; set; }
+        public float RA { get; set; }
+        public float Dec { get; set; }
+        public double ResidualArcmin { get; set; }
+        public bool Excluded { get; set; }
+        public string? ExclusionReason { get; set; }
+    }
+
     // Bright star catalog for alignment (visible from northern mid-latitudes)
     public static readonly List<CatalogStar> StarCatalog = new()
     {
@@ -62,6 +87,9 @@ public static class Alignment
     // Computed alignment matrix (3x3, row-major)
     private static float[]? _alignmentMatrix = null;
     
+    // Last alignment computation result
+    private static AlignmentResult? _lastResult = null;
+
     // Observer location (degrees)
     public static float Latitude { get; set; } = 50.0f;   // Default to ~central Europe
     public static float Longitude { get; set; } = 14.42f;  // Default to ~Prague
@@ -73,6 +101,7 @@ public static class Alignment
     {
         _points.Clear();
         _alignmentMatrix = null;
+        _lastResult = null;
         Logger.Notice("Alignment reset - all points cleared");
     }
 
@@ -170,6 +199,7 @@ public static class Alignment
         double bestAvg = ComputeAvgResidualForSubset(bestMatrix, allSkyVecs, allMountVecs, bestActive);
 
         var rejected = new List<int>();
+        var rejectionReasons = new Dictionary<int, string>();
 
         // Phase 2: Greedily try adding each subsequent star
         for (int k = 2; k < _points.Count; k++)
@@ -202,6 +232,7 @@ public static class Alignment
             else
             {
                 rejected.Add(k);
+                rejectionReasons[k] = $"Would increase error from {bestAvg * 60:F1}' to {candidateAvg * 60:F1}'";
                 Logger.Warn($"  Auto-excluded star{k + 1} (RA={_points[k].RA:F2}h Dec={_points[k].Dec:F1}°): " +
                     $"would increase error from {bestAvg * 60:F1}' to {candidateAvg * 60:F1}' — likely step loss during slew");
             }
@@ -254,6 +285,7 @@ public static class Alignment
                         _alignmentMatrix = ComputeRotationMatrixSVD(sk, mk);
                     }
 
+                    rejectionReasons[rejIdx] = $"Outlier: residual {worstRes * 60:F1}' vs best {bestRes * 60:F1}'";
                     Logger.Warn($"  Outlier-rejected star{rejIdx + 1} (RA={_points[rejIdx].RA:F2}h Dec={_points[rejIdx].Dec:F1}°): " +
                         $"residual {worstRes * 60:F1}' vs best {bestRes * 60:F1}'");
                     changed = true;
@@ -297,6 +329,7 @@ public static class Alignment
         // Per-star residual report
         double totalResidual = 0;
         int activeCount = 0;
+        var starResiduals = new List<StarResidualInfo>();
         for (int i = 0; i < _points.Count; i++)
         {
             double err = ComputePointResidual(_alignmentMatrix!, allSkyVecs[i], allMountVecs[i]);
@@ -304,6 +337,16 @@ public static class Alignment
             bool isRejected = rejected.Contains(i);
             string tag = isRejected ? " [EXCLUDED]" : "";
             Logger.Notice($"  Residual star{i + 1} (RA={_points[i].RA:F2}h Dec={_points[i].Dec:F1}°): {err * 60:F1}' ({err:F3}°){tag}");
+
+            starResiduals.Add(new StarResidualInfo
+            {
+                Index = i + 1,
+                RA = _points[i].RA,
+                Dec = _points[i].Dec,
+                ResidualArcmin = Math.Round(err * 60, 2),
+                Excluded = isRejected,
+                ExclusionReason = isRejected && rejectionReasons.TryGetValue(i, out var reason) ? reason : null
+            });
 
             if (!isRejected)
             {
@@ -324,7 +367,6 @@ public static class Alignment
             Logger.Warn($"  *** STEP LOSS DETECTED: worst pair Δ={maxPairSepError:F2}° ({Math.Abs(maxStepLossPct):F1}% loss) ***");
             Logger.Warn($"  *** Mount encoder positions don't match true star separations ***");
             Logger.Warn($"  *** TIP: Use stars closer in AZIMUTH to reduce Z-axis slew distance ***");
-            Logger.Warn($"  *** TIP: Warm up the Z bearing by slewing back and forth before calibrating ***");
         }
 
         if (avgResidual > 0.5 || maxPairSepError > 0.7)
@@ -356,6 +398,29 @@ public static class Alignment
             Logger.Notice($"  [{_alignmentMatrix[3]:F4}, {_alignmentMatrix[4]:F4}, {_alignmentMatrix[5]:F4}]");
             Logger.Notice($"  [{_alignmentMatrix[6]:F4}, {_alignmentMatrix[7]:F4}, {_alignmentMatrix[8]:F4}]");
         }
+
+        // Build alignment result for external consumers
+        string quality;
+        if (_alignmentMatrix == null)
+            quality = "REJECTED";
+        else if (avgResidual > 0.25 || maxPairSepError > 0.3)
+            quality = "MARGINAL";
+        else if (avgResidual > 0.10)
+            quality = "OK";
+        else
+            quality = "EXCELLENT";
+
+        _lastResult = new AlignmentResult
+        {
+            Quality = quality,
+            AverageResidualArcmin = Math.Round(avgResidual * 60, 2),
+            AverageResidualPixels = Math.Round(avgPixels, 1),
+            MaxPairErrorDeg = Math.Round(maxPairSepError, 3),
+            StepLossPercent = Math.Round(Math.Abs(maxStepLossPct), 1),
+            ActiveStarCount = bestActive.Count,
+            RejectedCount = rejected.Count,
+            Stars = starResiduals
+        };
     }
 
     /// <summary>
@@ -875,6 +940,12 @@ public static class Alignment
     /// Check if alignment is complete (matrix computed).
     /// </summary>
     public static bool IsAligned => _alignmentMatrix != null;
+
+    /// <summary>
+    /// Get the last alignment computation result (quality metrics, per-star residuals).
+    /// Null if no alignment has been attempted yet.
+    /// </summary>
+    public static AlignmentResult? LastResult => _lastResult;
 
     /// <summary>
     /// Get the computed alignment matrix (or identity if not aligned).
