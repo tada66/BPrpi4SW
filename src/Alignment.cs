@@ -102,6 +102,8 @@ public static class Alignment
         _points.Clear();
         _alignmentMatrix = null;
         _lastResult = null;
+        CurrentTargetRa  = null;
+        CurrentTargetDec = null;
         Logger.Notice("Alignment reset - all points cleared");
     }
 
@@ -942,6 +944,13 @@ public static class Alignment
     public static bool IsAligned => _alignmentMatrix != null;
 
     /// <summary>
+    /// Currently active tracking target (null when not tracking).
+    /// Set by StartTrackingAsync, cleared by Reset.
+    /// </summary>
+    public static float? CurrentTargetRa  { get; private set; }
+    public static float? CurrentTargetDec { get; private set; }
+
+    /// <summary>
     /// Get the last alignment computation result (quality metrics, per-star residuals).
     /// Null if no alignment has been attempted yet.
     /// </summary>
@@ -972,6 +981,10 @@ public static class Alignment
             Logger.Warn("Cannot start tracking - not aligned! Add at least 2 alignment points first.");
             return false;
         }
+
+        // Remember the tracking target for external display (LCD)
+        CurrentTargetRa  = targetRA;
+        CurrentTargetDec = targetDec;
 
         // Recompute alignment matrix with current time as the Pico's reference frame.
         // This ensures sky vectors are adjusted for sidereal drift since alignment.
