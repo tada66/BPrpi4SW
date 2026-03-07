@@ -48,7 +48,7 @@ public class LcdController : IDisposable
         }
 
         // Start 1-second cycling for rows 1 and 2
-        _cycleTimer = new Timer(OnCycleTick, null, 1000, 1000);
+        _cycleTimer = new Timer(OnCycleTick, null, 1500, 1500);
     }
 
     // ── Public setters ────────────────────────────────────────────────────────

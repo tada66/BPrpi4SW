@@ -304,15 +304,50 @@ public static class Alignment
         if (bestActive.Count > 2)
             Logger.Notice($"  {bestActive.Count}-star least-squares alignment (SVD)");
 
-        // Pairwise separation mismatch — PRIMARY step loss detector.
-        // If the mount physically loses steps during large slews, the angular
-        // separation between encoder positions will be LESS than the true sky separation.
-        double maxPairSepError = 0;
-        double maxStepLossPct = 0;
+        // Zenith proximity detection
+        // At mount-alt near 90°, cos(alt)→0 and azimuth loses all resolution
+        // in unit-vector space (alt-az singularity). This makes pairwise
+        // separation comparisons meaningless — NOT step loss.
+        bool anyNearZenith = false;
         for (int i = 0; i < _points.Count; i++)
         {
-            for (int j = i + 1; j < _points.Count; j++)
+            // Check mount-frame altitude (X encoder = altitude in arcsec)
+            double mountAltDeg = _points[i].MountX / 3600.0;
+            double cosAlt = Math.Cos(mountAltDeg * Math.PI / 180.0);
+
+            // Check true sky altitude
+            var (trueAlt, trueAz) = ComputeAltAz(_points[i].RA, _points[i].Dec, _points[i].TimeUtc, Latitude, Longitude);
+
+            bool isRejected = rejected.Contains(i);
+            string statusTag = isRejected ? " [EXCLUDED]" : "";
+
+            if (Math.Abs(cosAlt) < 0.26) // Mount tilt within ~15° of 90°
             {
+                anyNearZenith = true;
+                Logger.Warn($"  *** Star{i + 1}{statusTag}: mount tilt={mountAltDeg:F1}° (near 90°) — azimuth axis loses resolution (zenith singularity) ***");
+            }
+            if (trueAlt > 75.0)
+            {
+                Logger.Warn($"  Star{i + 1}{statusTag}: true altitude={trueAlt:F1}° — near zenith, alignment accuracy degrades above 75°");
+            }
+        }
+        if (anyNearZenith)
+        {
+            Logger.Warn($"  TIP: Best alignment accuracy is with stars at 30°-70° altitude.");
+        }
+
+        // Pairwise separation mismatch — diagnostic for step loss detection.
+        // Only check ACTIVE (non-excluded) star pairs to avoid false positives
+        // from stars that were already excluded for other reasons.
+        double maxPairSepError = 0;
+        double maxStepLossPct = 0;
+        for (int ai = 0; ai < bestActive.Count; ai++)
+        {
+            for (int aj = ai + 1; aj < bestActive.Count; aj++)
+            {
+                int i = bestActive[ai];
+                int j = bestActive[aj];
+
                 double pairSkySep = Math.Acos(Math.Max(-1.0, Math.Min(1.0,
                     allSkyVecs[i].x * allSkyVecs[j].x + allSkyVecs[i].y * allSkyVecs[j].y + allSkyVecs[i].z * allSkyVecs[j].z))) * 180.0 / Math.PI;
                 double pairMountSep = Math.Acos(Math.Max(-1.0, Math.Min(1.0,
@@ -320,11 +355,34 @@ public static class Alignment
                 double pairSepErr = Math.Abs(pairSkySep - pairMountSep);
                 double stepLoss = (pairSkySep > 0.5) ? (1.0 - pairMountSep / pairSkySep) * 100.0 : 0;
 
-                string lossTag = (Math.Abs(stepLoss) > 1.0) ? $", ~{Math.Abs(stepLoss):F1}% step loss" : "";
-                Logger.Notice($"  Pair star{i + 1}-star{j + 1}: sky={pairSkySep:F3}° mount={pairMountSep:F3}° (Δ={pairSepErr:F3}°{lossTag})");
+                // Check if either star is near zenith (mount-alt near 90°)
+                double altI = _points[i].MountX / 3600.0;
+                double altJ = _points[j].MountX / 3600.0;
+                bool eitherNearZenith = Math.Abs(Math.Cos(altI * Math.PI / 180.0)) < 0.26 ||
+                                        Math.Abs(Math.Cos(altJ * Math.PI / 180.0)) < 0.26;
 
-                if (pairSepErr > maxPairSepError) maxPairSepError = pairSepErr;
-                if (Math.Abs(stepLoss) > Math.Abs(maxStepLossPct)) maxStepLossPct = stepLoss;
+                string diagTag;
+                if (eitherNearZenith && Math.Abs(stepLoss) > 5.0)
+                {
+                    diagTag = $" [ZENITH SINGULARITY — not step loss]";
+                }
+                else if (Math.Abs(stepLoss) > 1.0)
+                {
+                    diagTag = $", ~{Math.Abs(stepLoss):F1}% step loss";
+                }
+                else
+                {
+                    diagTag = "";
+                }
+
+                Logger.Notice($"  Pair star{i + 1}-star{j + 1}: sky={pairSkySep:F3}° mount={pairMountSep:F3}° (Δ={pairSepErr:F3}°{diagTag})");
+
+                // Only count as step loss if NOT near zenith
+                if (!eitherNearZenith)
+                {
+                    if (pairSepErr > maxPairSepError) maxPairSepError = pairSepErr;
+                    if (Math.Abs(stepLoss) > Math.Abs(maxStepLossPct)) maxStepLossPct = stepLoss;
+                }
             }
         }
 
@@ -363,34 +421,44 @@ public static class Alignment
 
         Logger.Notice($"  Average residual: {avgResidual * 60:F1}' ({avgResidual:F3}°) ≈ {avgPixels:F0} pixels @ 28mm");
 
-        // Step loss warning
+        // Step loss warning — only for non-zenith pairs
         if (maxPairSepError > 0.3)
         {
-            Logger.Warn($"  *** STEP LOSS DETECTED: worst pair Δ={maxPairSepError:F2}° ({Math.Abs(maxStepLossPct):F1}% loss) ***");
+            Logger.Warn($"  *** STEP LOSS DETECTED: worst active pair Δ={maxPairSepError:F2}° ({Math.Abs(maxStepLossPct):F1}% loss) ***");
             Logger.Warn($"  *** Mount encoder positions don't match true star separations ***");
             Logger.Warn($"  *** TIP: Use stars closer in AZIMUTH to reduce Z-axis slew distance ***");
+            Logger.Warn($"  *** TIP: Warm up the Z bearing by slewing back and forth before calibrating ***");
         }
 
-        if (avgResidual > 0.5 || maxPairSepError > 0.7)
+        // Quality assessment — avg residual is the SOLE quality gate.
+        // Pairwise separation is diagnostic-only (unreliable near zenith).
+        // avgResidual thresholds tuned for ~44 arcsec/pixel imaging:
+        //   <0.10°→<8px  <0.25°→<21px  <0.50°→<41px  >0.50°→>41px
+        if (avgResidual > 0.5)
         {
             Logger.Warn($"  *** ALIGNMENT REJECTED: pointing would be ≈{avgPixels:F0}+ pixels off ***");
-            if (maxPairSepError > 0.5)
-                Logger.Warn($"  *** Cause: {Math.Abs(maxStepLossPct):F1}% step loss on Z bearing ***");
-            Logger.Warn($"  *** Please RESET and recalibrate with stars closer together in azimuth ***");
+            if (anyNearZenith)
+                Logger.Warn($"  *** Likely cause: calibration stars too close to zenith (alt-az singularity) ***");
+            else if (maxPairSepError > 0.3)
+                Logger.Warn($"  *** Likely cause: step loss during slew ({Math.Abs(maxStepLossPct):F1}%) ***");
+            Logger.Warn($"  *** Please RESET and recalibrate with stars at 30°-70° altitude ***");
             _alignmentMatrix = null;
         }
-        else if (avgResidual > 0.25 || maxPairSepError > 0.3)
+        else if (avgResidual > 0.25)
         {
-            Logger.Warn($"  Alignment MARGINAL: ~{avgPixels:F0}px pointing error (pair Δ={maxPairSepError:F2}°)");
-            Logger.Warn($"  Consider resetting and using star pairs closer in azimuth.");
+            Logger.Warn($"  Alignment MARGINAL: ~{avgPixels:F0}px pointing error");
+            if (anyNearZenith)
+                Logger.Warn($"  Stars are too close to zenith. Use stars at 30°-70° altitude.");
+            else
+                Logger.Warn($"  Consider resetting and recalibrating.");
         }
         else if (avgResidual > 0.10)
         {
-            Logger.Notice($"  Alignment quality: OK (~{avgPixels:F0}px error, pair Δ={maxPairSepError:F3}°)");
+            Logger.Notice($"  Alignment quality: OK (~{avgPixels:F0}px error)");
         }
         else
         {
-            Logger.Notice($"  Alignment quality: EXCELLENT (~{avgPixels:F0}px error, pair Δ={maxPairSepError:F3}°)");
+            Logger.Notice($"  Alignment quality: EXCELLENT (~{avgPixels:F0}px error)");
         }
 
         if (_alignmentMatrix != null)
@@ -405,7 +473,7 @@ public static class Alignment
         string quality;
         if (_alignmentMatrix == null)
             quality = "REJECTED";
-        else if (avgResidual > 0.25 || maxPairSepError > 0.3)
+        else if (avgResidual > 0.25)
             quality = "MARGINAL";
         else if (avgResidual > 0.10)
             quality = "OK";
@@ -643,8 +711,8 @@ public static class Alignment
         DateTime now = DateTime.UtcNow;
         double lst = ComputeLocalSiderealTime(now, Longitude);
         Console.WriteLine($"\nVisible alignment stars (LST={lst:F2}h, Lat={Latitude:F1}°, Lon={Longitude:F1}°):");
-        Console.WriteLine($"{"#",-4} {"Name",-12} {"RA(h)",-8} {"Dec(°)",-8} {"Alt(°)",-8} {"Az(°)",-8} {"Mag",-5}");
-        Console.WriteLine(new string('-', 56));
+        Console.WriteLine($"{"#",-4} {"Name",-12} {"RA(h)",-8} {"Dec(°)",-8} {"Alt(°)",-8} {"Az(°)",-8} {"Mag",-5} {"Note",-10}");
+        Console.WriteLine(new string('-', 68));
 
         int idx = 0;
         foreach (var star in StarCatalog)
@@ -652,10 +720,20 @@ public static class Alignment
             var (alt, az) = ComputeAltAz(star.RA, star.Dec, now, Latitude, Longitude);
             if (alt > 10.0) // Only show stars above 10° altitude
             {
-                Console.WriteLine($"{idx,-4} {star.Name,-12} {star.RA,-8:F3} {star.Dec,-8:F2} {alt,-8:F1} {az,-8:F1} {star.Magnitude,-5:F2}");
+                string note = "";
+                if (alt >= 30.0 && alt <= 70.0)
+                    note = "★ IDEAL";
+                else if (alt > 75.0)
+                    note = "⚠ ZENITH";
+                else if (alt <= 20.0)
+                    note = "low";
+
+                Console.WriteLine($"{idx,-4} {star.Name,-12} {star.RA,-8:F3} {star.Dec,-8:F2} {alt,-8:F1} {az,-8:F1} {star.Magnitude,-5:F2} {note}");
             }
             idx++;
         }
+        Console.WriteLine("  ★ IDEAL = best for calibration (30°-70° altitude)");
+        Console.WriteLine("  ⚠ ZENITH = near zenith, avoid for calibration (alt-az singularity)");
         Console.WriteLine();
     }
 

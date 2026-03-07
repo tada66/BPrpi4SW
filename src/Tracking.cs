@@ -29,6 +29,7 @@ internal static class Tracker
         }
         finally
         {
+            await UartClient.Client.ResumeMotors();
             UartClient.Client.PositionReceived -= handler;
         }
         return pos;
