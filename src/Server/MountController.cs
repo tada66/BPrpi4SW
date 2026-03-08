@@ -1,4 +1,5 @@
 using System;
+using System.Threading;
 using System.Threading.Tasks;
 
 /// <summary>
@@ -8,11 +9,13 @@ using System.Threading.Tasks;
 public class MountController : IDisposable
 {
     private readonly WebSocketServer _wsServer;
+    private readonly CameraController _cameraController;
     private bool _motorsEnabled;
 
-    public MountController(WebSocketServer wsServer)
+    public MountController(WebSocketServer wsServer, CameraController cameraController)
     {
         _wsServer = wsServer;
+        _cameraController = cameraController;
         SubscribeToEvents();
     }
 
@@ -181,5 +184,133 @@ public class MountController : IDisposable
         UartClient.Client.StatusReceived -= OnStatusReceived;
         UartClient.Client.PositionReceived -= OnPositionReceived;
         UartClient.Client.ReferenceLost -= OnReferenceLost;
+    }
+
+    // ── Plate-solve assisted operations ──
+
+    /// <summary>
+    /// Bind the camera instance for plate-solve operations.
+    /// Called when a camera connects.
+    /// </summary>
+    public void SetSolveCamera(Camera? camera)
+    {
+        Alignment.SolveCamera = camera;
+    }
+
+    public async Task<object> AutoCenterAsync(AutoCenterPayload payload)
+    {
+        EnsureSolveCamera();
+        var result = await Alignment.AutoCenterAsync(
+            payload.Ra, payload.Dec,
+            maxIterations: 5,
+            tolerancePx: payload.Tolerance,
+            ct: CancellationToken.None);
+
+        if (result == null)
+            throw new InvalidOperationException("Auto-center failed: plate solve not available or mount not aligned.");
+
+        return new
+        {
+            success = result.Success,
+            iterations = result.Iterations,
+            finalErrorPx = Math.Round(result.FinalErrorPx, 1),
+            finalErrorArcmin = Math.Round(result.FinalErrorArcmin, 2),
+            solvedRa = result.SolvedRA,
+            solvedDec = result.SolvedDec,
+            message = result.Message,
+            alignmentStatus = BuildAlignmentStatus()
+        };
+    }
+
+    public async Task<object> AutoCalibrateAsync(AutoCalibratePayload payload)
+    {
+        EnsureSolveCamera();
+        var result = await Alignment.AutoCalibrateAsync(
+            payload.AltSteps, payload.AzSteps,
+            ct: CancellationToken.None);
+
+        if (result == null)
+            throw new InvalidOperationException("Auto-calibrate failed: camera not connected or no initial alignment.");
+
+        return new
+        {
+            solvedCount = result.SolvedCount,
+            failedCount = result.FailedCount,
+            totalPositions = result.TotalPositions,
+            totalPoints = result.TotalPoints,
+            quality = result.Quality,
+            elapsedSeconds = result.ElapsedSeconds,
+            alignmentStatus = BuildAlignmentStatus()
+        };
+    }
+
+    public async Task<object> StartGuidedTrackingAsync(GuidedTrackingPayload payload)
+    {
+        if (!Alignment.IsAligned)
+            throw new InvalidOperationException("Cannot start guided tracking: mount is not calibrated.");
+
+        EnsureSolveCamera();
+
+        // Run guided tracking in background — returns immediately with initial centering result
+        var centerResult = await Alignment.StartGuidedTrackingAsync(
+            payload.Ra, payload.Dec, payload.Interval,
+            ct: CancellationToken.None);
+
+        return new
+        {
+            success = centerResult?.Success ?? false,
+            message = centerResult?.Message ?? "Guided tracking started",
+            initialErrorPx = Math.Round(centerResult?.FinalErrorPx ?? 0, 1)
+        };
+    }
+
+    public object StopGuidedTracking()
+    {
+        Alignment.StopGuidedTracking();
+        return new { message = "Guided tracking stopped" };
+    }
+
+    public async Task<object> SolveCurrentAsync()
+    {
+        EnsureSolveCamera();
+        var result = await Alignment.SolveCurrentAsync();
+        if (result == null)
+            throw new InvalidOperationException("Plate solve failed or no camera connected.");
+
+        return new
+        {
+            raCenterHours = Math.Round(result.RaCenterHours, 4),
+            decCenterDeg = Math.Round(result.DecCenterDeg, 4),
+            pixelScale = Math.Round(result.PixelScaleArcsecPerPx, 2),
+            rotationDeg = Math.Round(result.RotationDeg, 2),
+            fieldWidthDeg = Math.Round(result.FieldWidthDeg, 2),
+            fieldHeightDeg = Math.Round(result.FieldHeightDeg, 2),
+            solveTimeSeconds = Math.Round(result.SolveTime.TotalSeconds, 1)
+        };
+    }
+
+    public object ConfigurePlateSolver(PlateSolveConfigPayload payload)
+    {
+        if (payload.FocalLengthMm.HasValue)
+            PlateSolver.FocalLengthMm = payload.FocalLengthMm.Value;
+        if (payload.PixelSizeUm.HasValue)
+            PlateSolver.PixelSizeUm = payload.PixelSizeUm.Value;
+
+        return new
+        {
+            focalLengthMm = PlateSolver.FocalLengthMm,
+            pixelSizeUm = PlateSolver.PixelSizeUm,
+            plateScaleArcsecPerPx = Math.Round(PlateSolver.PlateScale, 2)
+        };
+    }
+
+    /// <summary>
+    /// Ensure the plate-solve camera is set from the camera controller.
+    /// </summary>
+    private void EnsureSolveCamera()
+    {
+        Alignment.SolveCamera = _cameraController.Camera;
+        if (Alignment.SolveCamera == null || !Alignment.SolveCamera.connected)
+            throw new InvalidOperationException("No camera connected. Connect a camera first.");
     }
 }

@@ -66,7 +66,8 @@ Invoke-Expression "$sshBase $User@${RemoteHost} 'chmod +x ~/BPrpi4SW/BPrpi4SW'"
 Write-Host "Copying boot scripts..."
 Invoke-Expression "$scpBase tools/lcd_boot.py $User@${RemoteHost}:/home/$User/BPrpi4SW/lcd_boot.py"
 Invoke-Expression "$scpBase scripts/install-service.sh $User@${RemoteHost}:/home/$User/BPrpi4SW/install-service.sh"
-Invoke-Expression "$sshBase $User@${RemoteHost} 'chmod +x ~/BPrpi4SW/lcd_boot.py ~/BPrpi4SW/install-service.sh'"
+Invoke-Expression "$scpBase scripts/setup-solver.sh $User@${RemoteHost}:/home/$User/BPrpi4SW/setup-solver.sh"
+Invoke-Expression "$sshBase $User@${RemoteHost} 'chmod +x ~/BPrpi4SW/lcd_boot.py ~/BPrpi4SW/install-service.sh ~/BPrpi4SW/setup-solver.sh'"
 
 if ($InstallService) {
   Write-Host "Installing systemd service (requires sudo)..."

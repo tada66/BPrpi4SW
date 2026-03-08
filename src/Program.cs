@@ -82,7 +82,7 @@ class Program
             var cameraController = new CameraController(wsServer, httpServer);
 
             // 4. Mount controller (subscribes to UART events, forwards via WebSocket)
-            var mountController = new MountController(wsServer);
+            var mountController = new MountController(wsServer, cameraController);
 
             // 5. Message router (connects WebSocket messages to controllers)
             var router = new MessageRouter(wsServer, cameraController, mountController);

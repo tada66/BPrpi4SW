@@ -261,3 +261,29 @@ public record WidgetRange(
 );
 
 #endregion
+
+#region Plate-Solve Payloads
+
+public record AutoCenterPayload(
+    [property: JsonPropertyName("ra")] float Ra,
+    [property: JsonPropertyName("dec")] float Dec,
+    [property: JsonPropertyName("tolerance")] float Tolerance = 15.0f
+);
+
+public record AutoCalibratePayload(
+    [property: JsonPropertyName("altSteps")] int AltSteps = 4,
+    [property: JsonPropertyName("azSteps")] int AzSteps = 5
+);
+
+public record GuidedTrackingPayload(
+    [property: JsonPropertyName("ra")] float Ra,
+    [property: JsonPropertyName("dec")] float Dec,
+    [property: JsonPropertyName("interval")] int Interval = 60
+);
+
+public record PlateSolveConfigPayload(
+    [property: JsonPropertyName("focalLengthMm")] float? FocalLengthMm = null,
+    [property: JsonPropertyName("pixelSizeUm")] float? PixelSizeUm = null
+);
+
+#endregion

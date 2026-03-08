@@ -106,6 +106,9 @@ public static class Alignment
     public static float Latitude { get; set; } = 50.0f;   // Default to ~central Europe
     public static float Longitude { get; set; } = 14.42f;  // Default to ~Prague
 
+    /// <summary>Plate scale in arcsec/pixel — derived from PlateSolver config.</summary>
+    public static double PlateScale => PlateSolver.PlateScale;
+
     /// <summary>
     /// Clear all alignment points and reset matrix.
     /// </summary>
@@ -613,10 +616,10 @@ public static class Alignment
         }
         double avgResidual = totalResidual / Math.Max(1, activeCount);
 
-        const double PLATE_SCALE = 43.7; // arcsec per pixel
-        double avgPixels = avgResidual * 3600.0 / PLATE_SCALE;
+        double plateScale = PlateScale;
+        double avgPixels = avgResidual * 3600.0 / plateScale;
 
-        Logger.Notice($"  Average residual: {avgResidual * 60:F1}' ({avgResidual:F3}°) ≈ {avgPixels:F0} pixels @ 28mm");
+        Logger.Notice($"  Average residual: {avgResidual * 60:F1}' ({avgResidual:F3}°) ≈ {avgPixels:F0} pixels @ {PlateSolver.FocalLengthMm:F0}mm");
 
         // Step loss warning — only meaningful when using a rotation matrix.
         // Under affine alignment, pairwise separation differences are EXPECTED:
@@ -1471,7 +1474,7 @@ public static class Alignment
             // Estimate model residual at the tracked target by checking nearest calibration star's residual
             if (nearestIdx >= 0)
             {
-                const double PLATE_SCALE = 43.7; // arcsec per pixel
+                double PLATE_SCALE = PlateScale;
                 var calSky = CelestialToUnitVector(_points[nearestIdx].RA, _points[nearestIdx].Dec, refDateTime, _points[nearestIdx].TimeUtc);
                 var calMount = MountToUnitVector(_points[nearestIdx].MountX, _points[nearestIdx].MountY, _points[nearestIdx].MountZ);
                 double calResidual = _isAffineMatrix
@@ -1498,7 +1501,7 @@ public static class Alignment
 
         if (_isAffineMatrix && _activeIndices.Count >= 4)
         {
-            const double LOCAL_PLATE_SCALE = 43.7; // arcsec per pixel
+            double LOCAL_PLATE_SCALE = PlateScale;
 
             // Compute distance from target to each active calibration star
             var starDistances = new List<(int idx, double dist)>();
@@ -1565,6 +1568,716 @@ public static class Alignment
             refTime, 
             Latitude
         );
+    }
+
+    // ============================================================
+    //  Plate-Solve Assisted Operations
+    // ============================================================
+
+    /// <summary>
+    /// Reference to the camera instance used for plate-solve captures.
+    /// Must be set before calling AutoCenter / AutoCalibrate / GuidedTracking.
+    /// </summary>
+    public static Camera? SolveCamera { get; set; }
+
+    /// <summary>
+    /// Active guided-tracking cancellation source — allows stopping guided tracking.
+    /// </summary>
+    private static CancellationTokenSource? _guideCts;
+
+    /// <summary>
+    /// Auto-center on a target using plate solving.
+    /// Goto → capture → solve → measure error → correct → repeat until centered.
+    /// Each solved frame also becomes a calibration point, continuously improving the model.
+    /// </summary>
+    /// <param name="targetRA">Target RA in hours.</param>
+    /// <param name="targetDec">Target Dec in degrees.</param>
+    /// <param name="maxIterations">Maximum correction iterations (default 5).</param>
+    /// <param name="tolerancePx">Target centering tolerance in pixels (default 15).</param>
+    /// <param name="ct">Cancellation token.</param>
+    /// <returns>Result with final centering error, or null if solve failed.</returns>
+    public static async Task<AutoCenterResult?> AutoCenterAsync(
+        float targetRA, float targetDec,
+        int maxIterations = 5, double tolerancePx = 15.0,
+        CancellationToken ct = default)
+    {
+        if (SolveCamera == null || !SolveCamera.connected)
+        {
+            Logger.Warn("AutoCenter: no camera connected. Set Alignment.SolveCamera first.");
+            return null;
+        }
+
+        if (!IsAligned)
+        {
+            Logger.Warn("AutoCenter: mount not aligned. Need at least 2 alignment stars.");
+            return null;
+        }
+
+        double plateScale = PlateScale;
+        Logger.Notice($"AutoCenter: target RA={targetRA:F4}h, Dec={targetDec:F4}°, tolerance={tolerancePx:F0}px ({tolerancePx * plateScale:F0}\")");
+
+        // Initial goto using current alignment matrix
+        Logger.Notice("AutoCenter: starting initial tracking goto...");
+        bool trackOk = await StartTrackingAsync(targetRA, targetDec);
+        if (!trackOk)
+        {
+            Logger.Warn("AutoCenter: failed to start tracking");
+            return null;
+        }
+
+        // Wait for mount to settle after goto — estimate distance from current pointing
+        {
+            var lastPt = _points[^1];
+            var curAltAz = ComputeAltAz(lastPt.RA, lastPt.Dec, DateTime.UtcNow, Latitude, Longitude);
+            var tgtAltAz = ComputeAltAz(targetRA, targetDec, DateTime.UtcNow, Latitude, Longitude);
+            double maxDelta = Math.Max(Math.Abs(tgtAltAz.alt - curAltAz.alt), Math.Abs(tgtAltAz.az - curAltAz.az));
+            await WaitForMoveCompleteAsync((int)(maxDelta * 3600), ct);
+        }
+
+        // Save original camera settings to restore after
+        string? origIso = null;
+        string? origShutter = null;
+        try { origIso = SolveCamera.Iso.value.ToString(); } catch { }
+        try { origShutter = SolveCamera.shutterSpeed.value; } catch { }
+
+        double lastErrorPx = double.MaxValue;
+        int iteration = 0;
+
+        try
+        {
+            for (iteration = 1; iteration <= maxIterations; iteration++)
+            {
+                ct.ThrowIfCancellationRequested();
+
+                Logger.Notice($"AutoCenter: iteration {iteration}/{maxIterations}");
+
+                // Configure camera for a short plate-solve exposure
+                try
+                {
+                    SolveCamera.Iso.value = 3200;
+                    SolveCamera.shutterSpeed.value = "2";
+                }
+                catch (Exception ex)
+                {
+                    Logger.Warn($"AutoCenter: could not set camera params: {ex.Message}");
+                    // Continue anyway — current settings might work
+                }
+
+                // Capture image
+                string baseName = $"solve_{DateTime.Now:yyyyMMdd_HHmmss}";
+                string imagePath;
+                try
+                {
+                    imagePath = await Task.Run(() => SolveCamera.CaptureImage(baseName), ct);
+                    Logger.Notice($"AutoCenter: captured {Path.GetFileName(imagePath)}");
+                }
+                catch (Exception ex)
+                {
+                    Logger.Warn($"AutoCenter: capture failed: {ex.Message}");
+                    return null;
+                }
+
+                // Read mount position at capture time
+                var mountPos = await Tracker.GetAxisPositions();
+
+                // Plate solve with hint from alignment prediction
+                var solve = await PlateSolver.SolveAsync(imagePath, targetRA, targetDec, 30.0, ct);
+                if (solve == null)
+                {
+                    Logger.Warn("AutoCenter: plate solve failed — cannot determine pointing");
+                    // Clean up the solve image
+                    TryDeleteFile(imagePath);
+                    return new AutoCenterResult
+                    {
+                        Success = false,
+                        Iterations = iteration,
+                        FinalErrorPx = lastErrorPx,
+                        Message = "Plate solve failed"
+                    };
+                }
+
+                // Compute sky error
+                double dRaDeg = (targetRA - solve.RaCenterHours) * 15.0 * Math.Cos(targetDec * Math.PI / 180.0);
+                double dDecDeg = targetDec - solve.DecCenterDeg;
+                double errorDeg = Math.Sqrt(dRaDeg * dRaDeg + dDecDeg * dDecDeg);
+                double errorPx = errorDeg * 3600.0 / plateScale;
+                lastErrorPx = errorPx;
+
+                Logger.Notice($"AutoCenter: pointing error = {errorDeg * 60:F1}' ({errorPx:F0}px) " +
+                              $"[ΔRA={dRaDeg * 60:F1}', ΔDec={dDecDeg * 60:F1}']");
+
+                // Add this solved position as a calibration point (self-improving model)
+                AddAlignmentPoint(
+                    (float)solve.RaCenterHours, (float)solve.DecCenterDeg,
+                    mountPos.XArcsecs, mountPos.YArcsecs, mountPos.ZArcsecs);
+                Logger.Notice($"AutoCenter: added plate-solve calibration point (now {PointCount} total)");
+
+                // Check convergence
+                if (errorPx < tolerancePx)
+                {
+                    Logger.Notice($"AutoCenter: CENTERED in {iteration} iteration(s)! Error={errorPx:F1}px < {tolerancePx:F0}px");
+
+                    // Restart tracking with the improved alignment model
+                    await StartTrackingAsync(targetRA, targetDec);
+
+                    TryDeleteFile(imagePath);
+                    return new AutoCenterResult
+                    {
+                        Success = true,
+                        Iterations = iteration,
+                        FinalErrorPx = errorPx,
+                        FinalErrorArcmin = errorDeg * 60,
+                        SolvedRA = solve.RaCenterHours,
+                        SolvedDec = solve.DecCenterDeg,
+                        Message = $"Centered in {iteration} iteration(s)"
+                    };
+                }
+
+                // Apply correction: stop tracking, move mount, restart
+                Logger.Notice($"AutoCenter: correcting — ΔAlt={dDecDeg * 3600:F0}\", ΔAz={dRaDeg * 3600:F0}\"");
+                await UartClient.Client.StopAll();
+                await Task.Delay(500, ct);
+
+                // Convert sky error to mount correction
+                // Use the alignment matrix to map the sky-space error into mount-space
+                // For small corrections: just use alt-az deltas directly
+                var targetAltAz = ComputeAltAz(targetRA, targetDec, DateTime.UtcNow, Latitude, Longitude);
+                var actualAltAz = ComputeAltAz(solve.RaCenterHours, solve.DecCenterDeg, DateTime.UtcNow, Latitude, Longitude);
+
+                double corrAlt = targetAltAz.alt - actualAltAz.alt;  // degrees
+                double corrAz = targetAltAz.az - actualAltAz.az;     // degrees
+                // Handle azimuth wrapping
+                if (corrAz > 180.0) corrAz -= 360.0;
+                if (corrAz < -180.0) corrAz += 360.0;
+
+                int corrXArcsec = (int)(corrAlt * 3600.0);
+                int corrZArcsec = (int)(corrAz * 3600.0);
+
+                Logger.Notice($"AutoCenter: applying mount correction X={corrXArcsec}\", Z={corrZArcsec}\"");
+                await UartClient.Client.MoveRelative(Axis.X, corrXArcsec);
+                await UartClient.Client.MoveRelative(Axis.Z, corrZArcsec);
+
+                // Wait for move to complete (adaptive)
+                int maxCorr = Math.Max(Math.Abs(corrXArcsec), Math.Abs(corrZArcsec));
+                await WaitForMoveCompleteAsync(maxCorr, ct);
+
+                // Restart tracking with the improved alignment
+                await StartTrackingAsync(targetRA, targetDec);
+                await Task.Delay(2000, ct);
+
+                TryDeleteFile(imagePath);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            Logger.Notice("AutoCenter: cancelled");
+            return null;
+        }
+        finally
+        {
+            // Restore original camera settings
+            RestoreCameraSettings(origIso, origShutter);
+        }
+
+        Logger.Warn($"AutoCenter: did not converge after {maxIterations} iterations (last error={lastErrorPx:F1}px)");
+        return new AutoCenterResult
+        {
+            Success = false,
+            Iterations = maxIterations,
+            FinalErrorPx = lastErrorPx,
+            Message = $"Did not converge after {maxIterations} iterations"
+        };
+    }
+
+    /// <summary>
+    /// Automatic calibration: slew to a grid of positions AROUND the current pointing,
+    /// plate-solve each, and build a dense calibration map.
+    /// Requires at least 1 manual alignment point so we know where we are.
+    /// The grid uses small relative offsets (±spanDeg) from the current alt-az position
+    /// to keep movements safe and localized.
+    /// </summary>
+    /// <param name="altSteps">Number of altitude steps (default 3).</param>
+    /// <param name="azSteps">Number of azimuth steps (default 3).</param>
+    /// <param name="ct">Cancellation token.</param>
+    /// <returns>Result with number of successful solves.</returns>
+    public static async Task<AutoCalibrateResult?> AutoCalibrateAsync(
+        int altSteps = 3, int azSteps = 3,
+        CancellationToken ct = default)
+    {
+        if (SolveCamera == null || !SolveCamera.connected)
+        {
+            Logger.Warn("AutoCalibrate: no camera connected.");
+            return null;
+        }
+
+        if (_points.Count < 1)
+        {
+            Logger.Warn("AutoCalibrate: need at least 1 alignment point. Center a star manually first.");
+            return null;
+        }
+
+        int totalPositions = altSteps * azSteps;
+        Logger.Notice($"AutoCalibrate: scanning {totalPositions} positions ({altSteps} alt × {azSteps} az) around current pointing");
+
+        // ── Compute center of grid from the CURRENT mount pointing ──
+        var lastPt = _points[^1];
+        var (refAlt, refAz) = ComputeAltAz(lastPt.RA, lastPt.Dec, DateTime.UtcNow, Latitude, Longitude);
+        Logger.Notice($"AutoCalibrate: reference position alt={refAlt:F1}°, az={refAz:F1}°");
+
+        // Grid span: ±5° per step from center (so 3 steps → -5°, 0°, +5° = 10° span)
+        const double StepSpanDeg = 5.0;
+
+        // Build relative offsets centered on zero
+        double[] altOffsets = new double[altSteps];
+        for (int i = 0; i < altSteps; i++)
+            altOffsets[i] = altSteps == 1 ? 0.0
+                : -StepSpanDeg * (altSteps - 1) / 2.0 + StepSpanDeg * i;
+
+        double[] azOffsets = new double[azSteps];
+        for (int i = 0; i < azSteps; i++)
+            azOffsets[i] = azSteps == 1 ? 0.0
+                : -StepSpanDeg * (azSteps - 1) / 2.0 + StepSpanDeg * i;
+
+        // Save camera settings
+        string? origIso = null;
+        string? origShutter = null;
+        try { origIso = SolveCamera.Iso.value.ToString(); } catch { }
+        try { origShutter = SolveCamera.shutterSpeed.value; } catch { }
+
+        int solved = 0;
+        int failed = 0;
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+
+        try
+        {
+            // Configure camera for plate solving
+            try
+            {
+                SolveCamera.Iso.value = 3200;
+                SolveCamera.shutterSpeed.value = "2";
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn($"AutoCalibrate: could not set camera params: {ex.Message}");
+            }
+
+            int posNum = 0;
+            for (int ai = 0; ai < altSteps; ai++)
+            {
+                for (int azi = 0; azi < azSteps; azi++)
+                {
+                    ct.ThrowIfCancellationRequested();
+                    posNum++;
+
+                    double targetAlt = refAlt + altOffsets[ai];
+                    double targetAz = refAz + azOffsets[azi];
+
+                    // Safety: clamp altitude to [15°, 80°] to prevent crashes
+                    if (targetAlt < 15.0 || targetAlt > 80.0)
+                    {
+                        Logger.Notice($"AutoCalibrate: skipping position {posNum}/{totalPositions} — alt={targetAlt:F1}° outside safe range [15°,80°]");
+                        failed++;
+                        continue;
+                    }
+
+                    // Normalize azimuth to 0-360
+                    if (targetAz < 0) targetAz += 360.0;
+                    if (targetAz >= 360) targetAz -= 360.0;
+
+                    // Convert alt-az → RA/Dec for current time
+                    var (raH, decD) = AltAzToRaDec(targetAlt, targetAz, DateTime.UtcNow, Latitude, Longitude);
+
+                    // Compute move distance for logging and wait-time
+                    double moveAltDeg = Math.Abs(altOffsets[ai] - (ai > 0 || azi > 0 ? altOffsets[ai > 0 && azi == 0 ? ai - 1 : ai] : 0));
+                    double moveAzDeg = Math.Abs(azOffsets[azi] - (azi > 0 ? azOffsets[azi - 1] : 0));
+                    if (posNum == 1) { moveAltDeg = Math.Abs(altOffsets[ai]); moveAzDeg = Math.Abs(azOffsets[azi]); }
+
+                    Logger.Notice($"AutoCalibrate: position {posNum}/{totalPositions} — alt={targetAlt:F1}°, az={targetAz:F1}° (offset: Δalt={altOffsets[ai]:+0.0;-0.0}°, Δaz={azOffsets[azi]:+0.0;-0.0}°)");
+
+                    // Slew to position using relative moves from current
+                    await GotoApproximateAsync((float)raH, (float)decD);
+
+                    // Wait for movement to complete (adaptive, based on move size)
+                    double maxMoveDeg = Math.Max(Math.Abs(altOffsets[ai]), Math.Abs(azOffsets[azi])) + StepSpanDeg;
+                    await WaitForMoveCompleteAsync((int)(maxMoveDeg * 3600), ct);
+
+                    // Capture
+                    string baseName = $"cal_{DateTime.Now:yyyyMMdd_HHmmss}";
+                    string imagePath;
+                    try
+                    {
+                        imagePath = await Task.Run(() => SolveCamera.CaptureImage(baseName), ct);
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.Warn($"AutoCalibrate: capture failed at pos {posNum}: {ex.Message}");
+                        failed++;
+                        continue;
+                    }
+
+                    // Read mount position right after capture
+                    var mountPos = await Tracker.GetAxisPositions();
+
+                    // Plate solve with hint from expected position
+                    var solve = await PlateSolver.SolveAsync(imagePath, raH, decD, 30.0, ct);
+                    if (solve == null)
+                    {
+                        Logger.Warn($"AutoCalibrate: solve failed at pos {posNum}");
+                        failed++;
+                        TryDeleteFile(imagePath);
+                        continue;
+                    }
+
+                    // Add calibration point
+                    AddAlignmentPoint(
+                        (float)solve.RaCenterHours, (float)solve.DecCenterDeg,
+                        mountPos.XArcsecs, mountPos.YArcsecs, mountPos.ZArcsecs);
+                    solved++;
+                    Logger.Notice($"AutoCalibrate: position {posNum} solved — RA={solve.RaCenterHours:F4}h, Dec={solve.DecCenterDeg:F4}° (total points: {PointCount})");
+
+                    TryDeleteFile(imagePath);
+                }
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            Logger.Notice("AutoCalibrate: cancelled");
+        }
+        finally
+        {
+            // Return to starting position
+            try
+            {
+                var (startRA, startDec) = AltAzToRaDec(refAlt, refAz, DateTime.UtcNow, Latitude, Longitude);
+                Logger.Notice("AutoCalibrate: returning to starting position...");
+                await GotoApproximateAsync((float)startRA, (float)startDec);
+                await WaitForMoveCompleteAsync((int)(StepSpanDeg * (Math.Max(altSteps, azSteps) - 1) * 3600), ct);
+            }
+            catch { }
+
+            RestoreCameraSettings(origIso, origShutter);
+        }
+
+        sw.Stop();
+        string quality = LastResult?.Quality ?? "UNKNOWN";
+        Logger.Notice($"AutoCalibrate: complete — {solved}/{totalPositions} positions solved, " +
+                      $"{failed} failed, alignment quality: {quality}, took {sw.Elapsed.TotalMinutes:F1} min");
+
+        return new AutoCalibrateResult
+        {
+            SolvedCount = solved,
+            FailedCount = failed,
+            TotalPositions = totalPositions,
+            TotalPoints = PointCount,
+            Quality = quality,
+            ElapsedSeconds = (int)sw.Elapsed.TotalSeconds
+        };
+    }
+
+    /// <summary>
+    /// Start tracked observation with periodic plate-solve guiding.
+    /// Combinesx auto-centering and periodic drift correction.
+    /// </summary>
+    /// <param name="targetRA">Target RA in hours.</param>
+    /// <param name="targetDec">Target Dec in degrees.</param>
+    /// <param name="guideIntervalSeconds">Seconds between guide corrections (default 60).</param>
+    /// <param name="ct">Cancellation token.</param>
+    public static async Task<AutoCenterResult?> StartGuidedTrackingAsync(
+        float targetRA, float targetDec,
+        int guideIntervalSeconds = 60,
+        CancellationToken ct = default)
+    {
+        // Cancel any existing guided tracking
+        StopGuidedTracking();
+
+        _guideCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        var guideCt = _guideCts.Token;
+
+        Logger.Notice($"GuidedTracking: target RA={targetRA:F4}h, Dec={targetDec:F4}°, guide interval={guideIntervalSeconds}s");
+
+        // Phase 1: Auto-center first
+        var centerResult = await AutoCenterAsync(targetRA, targetDec, maxIterations: 5, tolerancePx: 15.0, ct: guideCt);
+        if (centerResult == null || !centerResult.Success)
+        {
+            Logger.Warn("GuidedTracking: initial centering failed");
+            return centerResult;
+        }
+
+        Logger.Notice($"GuidedTracking: centered ({centerResult.FinalErrorPx:F1}px). Starting guide loop every {guideIntervalSeconds}s...");
+
+        // Phase 2: Guide loop
+        double plateScale = PlateScale;
+        int corrections = 0;
+        int checks = 0;
+
+        // Save camera settings
+        string? origIso = null;
+        string? origShutter = null;
+        try { origIso = SolveCamera!.Iso.value.ToString(); } catch { }
+        try { origShutter = SolveCamera!.shutterSpeed.value; } catch { }
+
+        try
+        {
+            while (!guideCt.IsCancellationRequested)
+            {
+                // Wait for the guide interval
+                await Task.Delay(guideIntervalSeconds * 1000, guideCt);
+                checks++;
+
+                guideCt.ThrowIfCancellationRequested();
+
+                // Set camera for short solve exposure
+                try
+                {
+                    SolveCamera!.Iso.value = 3200;
+                    SolveCamera.shutterSpeed.value = "2";
+                }
+                catch { }
+
+                // Capture
+                string baseName = $"guide_{DateTime.Now:yyyyMMdd_HHmmss}";
+                string imagePath;
+                try
+                {
+                    imagePath = await Task.Run(() => SolveCamera!.CaptureImage(baseName), guideCt);
+                }
+                catch (Exception ex)
+                {
+                    Logger.Warn($"GuidedTracking: guide capture failed: {ex.Message}");
+                    continue;
+                }
+
+                // Read mount position
+                var mountPos = await Tracker.GetAxisPositions();
+
+                // Solve
+                var solve = await PlateSolver.SolveAsync(imagePath, targetRA, targetDec, 10.0, guideCt);
+                if (solve == null)
+                {
+                    Logger.Warn("GuidedTracking: guide solve failed, skipping");
+                    TryDeleteFile(imagePath);
+                    continue;
+                }
+
+                // Compute error
+                double dRaDeg = (targetRA - solve.RaCenterHours) * 15.0 * Math.Cos(targetDec * Math.PI / 180.0);
+                double dDecDeg = targetDec - solve.DecCenterDeg;
+                double errorDeg = Math.Sqrt(dRaDeg * dRaDeg + dDecDeg * dDecDeg);
+                double errorPx = errorDeg * 3600.0 / plateScale;
+
+                Logger.Notice($"GuidedTracking: check #{checks} — drift={errorPx:F1}px ({errorDeg * 60:F1}')");
+
+                // Apply correction if drift > 3px
+                if (errorPx > 3.0)
+                {
+                    // Add calibration point
+                    AddAlignmentPoint(
+                        (float)solve.RaCenterHours, (float)solve.DecCenterDeg,
+                        mountPos.XArcsecs, mountPos.YArcsecs, mountPos.ZArcsecs);
+
+                    // Stop tracking, correct, restart
+                    await UartClient.Client.StopAll();
+                    await Task.Delay(500, guideCt);
+
+                    var targetAltAz = ComputeAltAz(targetRA, targetDec, DateTime.UtcNow, Latitude, Longitude);
+                    var actualAltAz = ComputeAltAz(solve.RaCenterHours, solve.DecCenterDeg, DateTime.UtcNow, Latitude, Longitude);
+
+                    double corrAlt = targetAltAz.alt - actualAltAz.alt;
+                    double corrAz = targetAltAz.az - actualAltAz.az;
+                    if (corrAz > 180.0) corrAz -= 360.0;
+                    if (corrAz < -180.0) corrAz += 360.0;
+
+                    int corrXArcsec = (int)(corrAlt * 3600.0);
+                    int corrZArcsec = (int)(corrAz * 3600.0);
+
+                    Logger.Notice($"GuidedTracking: correction X={corrXArcsec}\", Z={corrZArcsec}\"");
+                    await UartClient.Client.MoveRelative(Axis.X, corrXArcsec);
+                    await UartClient.Client.MoveRelative(Axis.Z, corrZArcsec);
+
+                    int maxCorr = Math.Max(Math.Abs(corrXArcsec), Math.Abs(corrZArcsec));
+                    await WaitForMoveCompleteAsync(maxCorr, guideCt);
+                    await StartTrackingAsync(targetRA, targetDec);
+
+                    corrections++;
+                    Logger.Notice($"GuidedTracking: correction #{corrections} applied ({errorPx:F1}px → recentered)");
+                }
+                else
+                {
+                    Logger.Notice($"GuidedTracking: on target ({errorPx:F1}px ≤ 3px threshold)");
+                }
+
+                TryDeleteFile(imagePath);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            Logger.Notice($"GuidedTracking: stopped after {checks} checks, {corrections} corrections");
+        }
+        finally
+        {
+            RestoreCameraSettings(origIso, origShutter);
+        }
+
+        return new AutoCenterResult
+        {
+            Success = true,
+            Iterations = corrections,
+            FinalErrorPx = 0,
+            Message = $"Guided tracking ended: {corrections} corrections over {checks} checks"
+        };
+    }
+
+    /// <summary>
+    /// Stop any active guided tracking loop.
+    /// </summary>
+    public static void StopGuidedTracking()
+    {
+        if (_guideCts != null)
+        {
+            Logger.Notice("Stopping guided tracking...");
+            _guideCts.Cancel();
+            _guideCts.Dispose();
+            _guideCts = null;
+        }
+    }
+
+    /// <summary>
+    /// Plate-solve the current pointing (diagnostic tool).
+    /// Captures an image and returns the solved position without moving the mount.
+    /// </summary>
+    public static async Task<PlateSolver.SolveResult?> SolveCurrentAsync(CancellationToken ct = default)
+    {
+        if (SolveCamera == null || !SolveCamera.connected)
+        {
+            Logger.Warn("SolveCurrent: no camera connected.");
+            return null;
+        }
+
+        // Use current tracking target as hint, or no hint
+        double? hintRA = CurrentTargetRa.HasValue ? (double)CurrentTargetRa.Value : null;
+        double? hintDec = CurrentTargetDec.HasValue ? (double)CurrentTargetDec.Value : null;
+
+        Logger.Notice("SolveCurrent: capturing for plate solve...");
+
+        // Configure camera
+        try
+        {
+            SolveCamera.Iso.value = 3200;
+            SolveCamera.shutterSpeed.value = "2";
+        }
+        catch { }
+
+        string baseName = $"solve_{DateTime.Now:yyyyMMdd_HHmmss}";
+        string imagePath = await Task.Run(() => SolveCamera.CaptureImage(baseName), ct);
+
+        var result = await PlateSolver.SolveAsync(imagePath, hintRA, hintDec, 30.0, ct);
+        TryDeleteFile(imagePath);
+
+        if (result != null)
+        {
+            Logger.Notice($"SolveCurrent: pointing at RA={result.RaCenterHours:F4}h, Dec={result.DecCenterDeg:F4}° " +
+                          $"(scale={result.PixelScaleArcsecPerPx:F2}\"/px)");
+        }
+
+        return result;
+    }
+
+    // ── Helper methods for plate-solve operations ──
+
+    /// <summary>
+    /// Convert alt-az coordinates back to RA/Dec for a given time and location.
+    /// Inverse of ComputeAltAz.
+    /// </summary>
+    public static (double raHours, double decDeg) AltAzToRaDec(
+        double altDeg, double azDeg, DateTime utcTime, double latDeg, double lonDeg)
+    {
+        double altRad = altDeg * Math.PI / 180.0;
+        double azRad = azDeg * Math.PI / 180.0;
+        double latRad = latDeg * Math.PI / 180.0;
+
+        // Dec from alt-az
+        double sinDec = Math.Sin(altRad) * Math.Sin(latRad) + Math.Cos(altRad) * Math.Cos(latRad) * Math.Cos(azRad);
+        sinDec = Math.Max(-1.0, Math.Min(1.0, sinDec));
+        double decRad = Math.Asin(sinDec);
+
+        // Hour angle from alt-az
+        double cosHA = (Math.Sin(altRad) - Math.Sin(decRad) * Math.Sin(latRad)) / (Math.Cos(decRad) * Math.Cos(latRad));
+        cosHA = Math.Max(-1.0, Math.Min(1.0, cosHA));
+        double haRad = Math.Acos(cosHA);
+        // Azimuth convention: 0=N, increases eastward. HA is positive west.
+        if (Math.Sin(azRad) > 0)
+            haRad = 2 * Math.PI - haRad;
+
+        double haDeg = haRad * 180.0 / Math.PI;
+        double lst = ComputeLocalSiderealTime(utcTime, lonDeg);
+
+        double raHours = lst - haDeg / 15.0;
+        raHours = ((raHours % 24.0) + 24.0) % 24.0;
+
+        return (raHours, decRad * 180.0 / Math.PI);
+    }
+
+    /// <summary>
+    /// Wait for mount movement to complete by monitoring status updates.
+    /// Calculates expected move time from the distance (in arcseconds) and waits,
+    /// then adds a settling delay.
+    /// Mount speed ≈ 7000 arcsec/sec (1000 steps/sec, ~0.14 steps/arcsec).
+    /// </summary>
+    /// <param name="maxDeltaArcsec">Largest axis delta in arcseconds.</param>
+    /// <param name="ct">Cancellation token.</param>
+    private static async Task WaitForMoveCompleteAsync(int maxDeltaArcsec, CancellationToken ct)
+    {
+        const double ArcsecPerSec = 7000.0; // approximate stepper speed
+        double expectedSec = Math.Abs(maxDeltaArcsec) / ArcsecPerSec;
+        int waitMs = (int)((expectedSec + 3.0) * 1000); // +3s settling margin
+        waitMs = Math.Max(waitMs, 3000); // at least 3 seconds
+        waitMs = Math.Min(waitMs, 120_000); // cap at 2 minutes safety
+        Logger.Debug($"WaitForMove: {maxDeltaArcsec}\" → ~{expectedSec:F1}s move, waiting {waitMs}ms total");
+        await Task.Delay(waitMs, ct);
+    }
+
+    private static void RestoreCameraSettings(string? origIso, string? origShutter)
+    {
+        if (SolveCamera == null || !SolveCamera.connected) return;
+        try
+        {
+            if (origIso != null && int.TryParse(origIso, out int iso))
+                SolveCamera.Iso.value = iso;
+            if (origShutter != null)
+                SolveCamera.shutterSpeed.value = origShutter;
+        }
+        catch (Exception ex)
+        {
+            Logger.Warn($"Could not restore camera settings: {ex.Message}");
+        }
+    }
+
+    private static void TryDeleteFile(string path)
+    {
+        try { if (File.Exists(path)) File.Delete(path); } catch { }
+    }
+
+    /// <summary>Result of an auto-centering operation.</summary>
+    public class AutoCenterResult
+    {
+        public bool Success { get; set; }
+        public int Iterations { get; set; }
+        public double FinalErrorPx { get; set; }
+        public double FinalErrorArcmin { get; set; }
+        public double SolvedRA { get; set; }
+        public double SolvedDec { get; set; }
+        public string Message { get; set; } = "";
+    }
+
+    /// <summary>Result of an auto-calibration operation.</summary>
+    public class AutoCalibrateResult
+    {
+        public int SolvedCount { get; set; }
+        public int FailedCount { get; set; }
+        public int TotalPositions { get; set; }
+        public int TotalPoints { get; set; }
+        public string Quality { get; set; } = "";
+        public int ElapsedSeconds { get; set; }
     }
 
     /// <summary>
