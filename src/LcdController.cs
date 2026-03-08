@@ -51,15 +51,13 @@ public class LcdController : IDisposable
         _cycleTimer = new Timer(OnCycleTick, null, 1500, 1500);
     }
 
-    // ── Public setters ────────────────────────────────────────────────────────
-
-    /// <summary>Row 0: connection type (WiFi/ETH/Hotspot) and IP. Written immediately.</summary>
+    /// Row 0: connection type (WiFi/ETH/Hotspot) and IP. Written immediately.
     public void SetConnectionInfo(string type, string ip)
     {
         lock (_lock) WriteLine(0, $"{type} {ip}");
     }
 
-    /// <summary>Row 2: update last received motor axis positions.</summary>
+    /// Row 2: update last received motor axis positions.
     public void UpdatePosition(float x, float y, float z)
     {
         _posX = x;
@@ -67,22 +65,20 @@ public class LcdController : IDisposable
         _posZ = z;
     }
 
-    /// <summary>Row 3: motor temperature and enable/pause state. Written immediately.</summary>
+    /// Row 3: motor temperature and enable/pause state. Written immediately.
     public void UpdateMotorStatus(float temp, bool enabled, bool paused)
     {
         string state = enabled ? (paused ? "   PAUSED" : "  RUNNING") : " DISABLED";
         lock (_lock) WriteLine(3, $"Temp:{temp:F1}C {state}");
     }
 
-    // ── Cycle timer ───────────────────────────────────────────────────────────
-
     private void OnCycleTick(object? _)
     {
         int step = Interlocked.Increment(ref _cycleStep);
 
         // Row 1 — Tracking target (RA / Dec, alternating each second)
-        float? ra  = Alignment.CurrentTargetRa;
-        float? dec = Alignment.CurrentTargetDec;
+        float? ra  = Calibration.CurrentTargetRa;
+        float? dec = Calibration.CurrentTargetDec;
 
         string row1 = (ra.HasValue && dec.HasValue)
             ? (step % 2 == 0
@@ -104,8 +100,6 @@ public class LcdController : IDisposable
             WriteLine(2, row2);
         }
     }
-
-    // ── Low-level helpers ─────────────────────────────────────────────────────
 
     private void WriteLine(int row, string text)
     {

@@ -34,10 +34,4 @@ internal static class Tracker
         }
         return pos;
     }
-    
-    internal static void printPos()
-    {
-        var pos = GetAxisPositions().Result;
-        Logger.Info($"Current Positions - X: {pos.XArcsecs} arcsecs, Y: {pos.YArcsecs} arcsecs, Z: {pos.ZArcsecs} arcsecs");
-    }
 }

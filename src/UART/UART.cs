@@ -117,9 +117,6 @@ public sealed class UartClient : IDisposable
 
     #region CRC8 Calculation
     
-    /// <summary>
-    /// Calculate CRC8 checksum (polynomial 0x07, init 0xFF)
-    /// </summary>
     private static byte CalculateCrc8(byte[] data, int offset, int count)
     {
         int crc = 0xFF;
@@ -229,9 +226,6 @@ public sealed class UartClient : IDisposable
         return false;
     }
 
-    /// <summary>
-    /// Send ACK for a received message
-    /// </summary>
     private void SendAck(byte msgIdToAck)
     {
         Logger.Debug($"  Sending ACK for message ID {msgIdToAck}");
@@ -442,8 +436,6 @@ public sealed class UartClient : IDisposable
     #endregion
 
     #region High-Level Command Methods
-
-    public Task<bool> Ping() => SendCommandAsync(UartCommand.CMD_ACK);
     
     public Task<bool> PauseMotors()
     {
@@ -542,138 +534,6 @@ public sealed class UartClient : IDisposable
         Array.Copy(BitConverter.GetBytes(latitude), 0, data, offset, 4);
 
         return SendCommandAsync(UartCommand.CMD_TRACK_CELESTIAL, data);
-    }
-
-    #endregion
-
-    #region Interactive Mode
-
-    public static void PrintHelp()
-    {
-        Console.WriteLine("\nAvailable commands:");
-        Console.WriteLine("1 - Send ping");
-        Console.WriteLine("2 - Pause motors");
-        Console.WriteLine("3 - Resume motors");
-        Console.WriteLine("5 - Stop all movement");
-        Console.WriteLine("x - Move X axis (absolute)");
-        Console.WriteLine("y - Move Y axis (absolute)");
-        Console.WriteLine("z - Move Z axis (absolute)");
-        Console.WriteLine("xr - Move axis X (relative)");
-        Console.WriteLine("yr - Move axis Y (relative)");
-        Console.WriteLine("zr - Move axis Z (relative)");
-        Console.WriteLine("p - Get current positions (all axes)");
-        Console.WriteLine("l - Start linear move");
-        Console.WriteLine("a - Star alignment mode (interactive 2-star alignment)");
-        Console.WriteLine("h - Show this help");
-        Console.WriteLine("q - Quit");
-    }
-
-    public async Task RunInteractiveAsync()
-    {
-        PrintHelp();
-
-        while (true)
-        {
-            Console.Write("> ");
-            string? input = Console.ReadLine()?.Trim().ToLower();
-            if (string.IsNullOrEmpty(input)) continue;
-
-            switch (input)
-            {
-                case "q":
-                case "quit":
-                    Console.WriteLine("Exiting...");
-                    return;
-
-                case "h":
-                case "help":
-                    PrintHelp();
-                    break;
-
-                case "1":
-                    Console.WriteLine("Sending ping...");
-                    await Ping();
-                    break;
-
-                case "2":
-                    await PauseMotors();
-                    break;
-
-                case "3":
-                    await ResumeMotors();
-                    break;
-
-                case "5":
-                    await StopAll();
-                    break;
-                case "xr":
-                    Console.Write("Enter X delta (arcseconds): ");
-                    if (int.TryParse(Console.ReadLine(), out int xDelta))
-                        await MoveRelative(Axis.X, xDelta);
-                    else
-                        Console.WriteLine("Invalid delta.");
-                    break;
-                case "yr":
-                    Console.Write("Enter Y delta (arcseconds): ");
-                    if (int.TryParse(Console.ReadLine(), out int yDelta))
-                        await MoveRelative(Axis.Y, yDelta);
-                    else
-                        Console.WriteLine("Invalid delta.");
-                    break;
-                case "zr":
-                    Console.Write("Enter Z delta (arcseconds): ");
-                    if (int.TryParse(Console.ReadLine(), out int zDelta))
-                        await MoveRelative(Axis.Z, zDelta);
-                    else
-                        Console.WriteLine("Invalid delta.");
-                    break;
-                case "x":
-                    Console.Write("Enter X position (arcseconds): ");
-                    if (int.TryParse(Console.ReadLine(), out int xPos))
-                        await MoveStatic(Axis.X, xPos);
-                    else
-                        Console.WriteLine("Invalid position.");
-                    break;
-
-                case "y":
-                    Console.Write("Enter Y position (arcseconds): ");
-                    if (int.TryParse(Console.ReadLine(), out int yPos))
-                        await MoveStatic(Axis.Y, yPos);
-                    else
-                        Console.WriteLine("Invalid position.");
-                    break;
-
-                case "z":
-                    Console.Write("Enter Z position (arcseconds): ");
-                    if (int.TryParse(Console.ReadLine(), out int zPos))
-                        await MoveStatic(Axis.Z, zPos);
-                    else
-                        Console.WriteLine("Invalid position.");
-                    break;
-
-                case "p":
-                    await GetPositions();
-                    break;
-
-                case "l":
-                    Console.Write("Enter X rate (arcsec/sec): ");
-                    if (!float.TryParse(Console.ReadLine(), out float xRate)) { Console.WriteLine("Invalid."); break; }
-                    Console.Write("Enter Y rate (arcsec/sec): ");
-                    if (!float.TryParse(Console.ReadLine(), out float yRate)) { Console.WriteLine("Invalid."); break; }
-                    Console.Write("Enter Z rate (arcsec/sec): ");
-                    if (!float.TryParse(Console.ReadLine(), out float zRate)) { Console.WriteLine("Invalid."); break; }
-                    await StartLinearMove(xRate, yRate, zRate);
-                    break;
-
-                case "a":
-                    await Alignment.InteractiveAlignmentTest();
-                    break;
-
-                default:
-                    Console.WriteLine($"Unknown command: '{input}'. Type 'h' for help.");
-                    break;
-            }
-        }
     }
 
     #endregion
