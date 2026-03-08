@@ -3,8 +3,12 @@ using System.Collections.Generic;
 using System.Threading.Tasks;
 
 /// <summary>
-/// Simple 2-star alignment system for alt-az mount celestial tracking.
-/// Computes a 3x3 rotation matrix that transforms sky coordinates to mount coordinates.
+/// Star alignment system for alt-az mount celestial tracking.
+/// Computes a 3x3 transformation matrix that maps sky coordinates to mount coordinates.
+/// For 2 stars: orthonormalized rotation matrix (3 DOF).
+/// For 3+ stars: affine matrix (9 DOF) that captures gear ratio errors, axis
+/// non-orthogonality, and flexure — or falls back to SVD rotation if the
+/// mount geometry is close to ideal.
 /// </summary>
 public static class Alignment
 {
@@ -85,7 +89,15 @@ public static class Alignment
     private static readonly List<AlignmentPoint> _points = new();
     
     // Computed alignment matrix (3x3, row-major)
+    // May be a rotation (2-star) or general affine (3+ stars).
     private static float[]? _alignmentMatrix = null;
+    
+    // Whether the current alignment matrix is affine (non-rotation).
+    // When true, Pico must normalize the result vector before extracting alt/az.
+    private static bool _isAffineMatrix = false;
+    
+    // Indices of active (non-excluded) calibration stars in the last alignment.
+    private static List<int> _activeIndices = new();
     
     // Last alignment computation result
     private static AlignmentResult? _lastResult = null;
@@ -101,6 +113,8 @@ public static class Alignment
     {
         _points.Clear();
         _alignmentMatrix = null;
+        _isAffineMatrix = false;
+        _activeIndices.Clear();
         _lastResult = null;
         CurrentTargetRa  = null;
         CurrentTargetDec = null;
@@ -163,8 +177,10 @@ public static class Alignment
     /// Compute the alignment matrix from stored points.
     /// For N=2: Uses two-vector orthonormalization (exact for 2 stars).
     /// For N≥3: Uses SVD least-squares (Wahba's problem) with quality-gated
-    /// star inclusion. Stars that worsen the alignment (e.g. due to step loss
-    /// during large slews) are automatically excluded.
+    /// star inclusion, then tries an affine (general 3×3) solve. If the affine
+    /// fits significantly better — indicating mount axis distortion — it is used
+    /// instead of the rotation, and previously excluded "step loss" stars may be
+    /// re-included under the affine model.
     /// When refTime is provided, sky vectors are adjusted for sidereal drift
     /// relative to that reference time (matching the Pico's frame).
     /// </summary>
@@ -241,6 +257,8 @@ public static class Alignment
         }
 
         _alignmentMatrix = bestMatrix;
+        _isAffineMatrix = false; // Phase 1-2 always uses rotation
+        _activeIndices = new List<int>(bestActive);
 
         // Phase 3: Final outlier check on accepted stars
         // Catches cases where an early star looked OK incrementally but is an outlier overall
@@ -295,14 +313,191 @@ public static class Alignment
             }
         }
 
+        // Update active indices after outlier removal
+        _activeIndices = new List<int>(bestActive);
+
+        // ============================================================
+        // Phase 4: Affine analysis for 3+ stars (diagnostic + re-evaluation)
+        // ============================================================
+        // The rotation matrix (SVD) forces det=1 and singular values [1,1,1].
+        // Real mounts have gear ratio errors, axis non-orthogonality, and flexure
+        // that make the sky→mount mapping non-rotational. A general 3×3 affine
+        // matrix captures these effects. For 3 stars it's exact; for N>3 it's
+        // least-squares.
+        //
+        // Currently we use the affine for DIAGNOSTICS and STAR RE-EVALUATION:
+        //  - If stars were excluded under rotation but fit under affine, the issue
+        //    is mount distortion, not step loss. We re-include them and recompute
+        //    the affine for better sky coverage.
+        //  - The affine matrix is sent to the Pico for tracking. The Pico MUST
+        //    normalize the mount vector before extracting alt/az (2-line change).
+        //    This normalization is safe for rotations too (norm≈1, no-op).
+        // ============================================================
+        if (bestActive.Count >= 3 || (_points.Count >= 3 && rejected.Count > 0))
+        {
+            // Try affine with ALL stars (including excluded) to detect mount distortion
+            var allPoints = new List<int>();
+            for (int i = 0; i < _points.Count; i++) allPoints.Add(i);
+
+            var affineSkyAll = new (double x, double y, double z)[_points.Count];
+            var affineMountAll = new (double x, double y, double z)[_points.Count];
+            for (int i = 0; i < _points.Count; i++)
+            {
+                affineSkyAll[i] = allSkyVecs[i];
+                affineMountAll[i] = allMountVecs[i];
+            }
+
+            float[]? affineMatrix = (_points.Count >= 3) ? ComputeAffineMatrix(affineSkyAll, affineMountAll) : null;
+            if (affineMatrix != null)
+            {
+                // Compare affine vs rotation residuals on ALL stars
+                double rotAvgAll = 0, affAvgAll = 0;
+                for (int i = 0; i < _points.Count; i++)
+                {
+                    rotAvgAll  += ComputePointResidual(_alignmentMatrix!, allSkyVecs[i], allMountVecs[i]);
+                    affAvgAll  += ComputePointResidualAffine(affineMatrix, allSkyVecs[i], allMountVecs[i]);
+                }
+                rotAvgAll  /= _points.Count;
+                affAvgAll  /= _points.Count;
+
+                Logger.Notice($"  Rotation avg residual (all {_points.Count} stars): {rotAvgAll * 60:F1}'");
+                Logger.Notice($"  Affine avg residual (all {_points.Count} stars): {affAvgAll * 60:F1}'");
+
+                // If affine fits much better → mount has significant distortion
+                if (affAvgAll < rotAvgAll * 0.5 || (rotAvgAll > 0.167 && affAvgAll < 0.05))
+                {
+                    Logger.Notice($"  *** AFFINE model fits {rotAvgAll / Math.Max(affAvgAll, 0.001):F0}× better than rotation ***");
+                    Logger.Notice($"  *** This means the mount has axis scale/orthogonality errors ***");
+
+                    // Re-evaluate excluded stars under affine.
+                    // Strategy depends on whether the system is over-determined:
+                    //
+                    // N = 3 (exact fit): residuals should be ~0. Use tight 10' threshold
+                    //   to catch genuinely bad stars.
+                    //
+                    // N >= 4 (over-determined): least-squares inherently produces nonzero
+                    //   residuals. Accept ALL stars if avg < 0.5° (30', ~40px) — the
+                    //   over-determined model gives far better extrapolation than an exact
+                    //   3-star fit. Only reject extreme outliers (> 3° or > 5× median).
+                    //
+                    var newActive = new List<int>();
+                    var newRejected = new List<int>();
+
+                    if (_points.Count >= 4 && affAvgAll < 0.5)
+                    {
+                        // Over-determined system with acceptable average: use generous outlier detection
+                        var residuals = new double[_points.Count];
+                        for (int i = 0; i < _points.Count; i++)
+                            residuals[i] = ComputePointResidualAffine(affineMatrix, allSkyVecs[i], allMountVecs[i]);
+
+                        var sorted = residuals.OrderBy(r => r).ToArray();
+                        double medianRes = sorted[sorted.Length / 2];
+
+                        for (int i = 0; i < _points.Count; i++)
+                        {
+                            // Only reject extreme outliers: > 3° AND > 5× median
+                            // (a star with 3° = 180' = 250px error is clearly wrong positioning)
+                            if (residuals[i] > 3.0 && residuals[i] > medianRes * 5)
+                            {
+                                newRejected.Add(i);
+                                if (!rejectionReasons.ContainsKey(i))
+                                    rejectionReasons[i] = $"Extreme outlier: {residuals[i] * 60:F1}' (> 3° and > 5× median {medianRes * 60:F1}')";
+                                Logger.Warn($"  Rejecting star{i + 1}: affine residual {residuals[i] * 60:F1}' is an extreme outlier");
+                            }
+                            else
+                            {
+                                newActive.Add(i);
+                                if (residuals[i] > 0.167)
+                                    Logger.Notice($"  Including star{i + 1} despite {residuals[i] * 60:F1}' affine residual (over-determined model)");
+                            }
+                        }
+                        Logger.Notice($"  Over-determined affine ({_points.Count} stars): avg={affAvgAll * 60:F1}', median={medianRes * 60:F1}', using {newActive.Count} stars");
+                    }
+                    else
+                    {
+                        // Exactly-determined (3 stars) or poor fit: use tight threshold
+                        for (int i = 0; i < _points.Count; i++)
+                        {
+                            double res = ComputePointResidualAffine(affineMatrix, allSkyVecs[i], allMountVecs[i]);
+                            if (res < 0.167) // < 10 arcmin → accept under affine
+                                newActive.Add(i);
+                            else
+                            {
+                                newRejected.Add(i);
+                                if (!rejectionReasons.ContainsKey(i))
+                                    rejectionReasons[i] = $"Affine residual {res * 60:F1}' > 10'";
+                            }
+                        }
+                    }
+
+                    if (newActive.Count >= 3)
+                    {
+                        int reincluded = 0;
+                        foreach (int idx in newActive)
+                            if (rejected.Contains(idx)) reincluded++;
+
+                        if (reincluded > 0)
+                            Logger.Notice($"  Re-including {reincluded} star(s) that were wrongly excluded as 'step loss' — actually mount distortion");
+
+                        // Recompute affine with all qualified stars
+                        var afSky = new (double x, double y, double z)[newActive.Count];
+                        var afMount = new (double x, double y, double z)[newActive.Count];
+                        for (int ai = 0; ai < newActive.Count; ai++)
+                        {
+                            afSky[ai] = allSkyVecs[newActive[ai]];
+                            afMount[ai] = allMountVecs[newActive[ai]];
+                        }
+                        float[]? finalAffine = ComputeAffineMatrix(afSky, afMount);
+                        if (finalAffine != null)
+                        {
+                            _alignmentMatrix = finalAffine;
+                            _isAffineMatrix = true;
+                            bestActive = newActive;
+                            rejected = newRejected;
+                            _activeIndices = new List<int>(bestActive);
+                            Logger.Notice($"  *** Using AFFINE alignment matrix ({newActive.Count} stars) ***");
+                            Logger.Notice($"  *** Pico firmware MUST normalize mount vector before asin/atan2 ***");
+                        }
+                    }
+                }
+                else
+                {
+                    Logger.Notice($"  Affine not significantly better — mount geometry is close to ideal");
+                }
+            }
+        }
+
         // ============================================================
         // Diagnostics and quality assessment
         // ============================================================
 
         if (rejected.Count > 0)
             Logger.Notice($"  Using {bestActive.Count} of {_points.Count} stars ({rejected.Count} excluded)");
-        if (bestActive.Count > 2)
-            Logger.Notice($"  {bestActive.Count}-star least-squares alignment (SVD)");
+        if (bestActive.Count > 2 && !_isAffineMatrix)
+            Logger.Notice($"  {bestActive.Count}-star least-squares alignment (SVD rotation)");
+        else if (_isAffineMatrix)
+            Logger.Notice($"  {bestActive.Count}-star affine alignment (captures mount distortion)");
+
+        // Calibration coverage report
+        {
+            double minDec = double.MaxValue, maxDec = double.MinValue;
+            double minRA = double.MaxValue, maxRA = double.MinValue;
+            for (int ai = 0; ai < bestActive.Count; ai++)
+            {
+                int idx = bestActive[ai];
+                if (_points[idx].Dec < minDec) minDec = _points[idx].Dec;
+                if (_points[idx].Dec > maxDec) maxDec = _points[idx].Dec;
+                if (_points[idx].RA < minRA) minRA = _points[idx].RA;
+                if (_points[idx].RA > maxRA) maxRA = _points[idx].RA;
+            }
+            double decSpan = maxDec - minDec;
+            double raSpan = (maxRA - minRA) * 15.0; // Convert hours to degrees
+            Logger.Notice($"  Calibration coverage: Dec [{minDec:F1}° to {maxDec:F1}°] (span {decSpan:F1}°), RA [{minRA:F1}h to {maxRA:F1}h] (span {raSpan:F1}°)");
+            if (decSpan < 10.0 && bestActive.Count <= 2)
+                Logger.Notice($"  TIP: Stars are close in declination ({decSpan:F1}°). Add a star at different Dec for better sky coverage.");
+            if (decSpan < 5.0 && raSpan < 30.0 && bestActive.Count <= 2)
+                Logger.Warn($"  *** Calibration covers a very small sky area — expect errors beyond {Math.Max(decSpan, raSpan):F0}° from this zone ***");
+        }
 
         // Zenith proximity detection
         // At mount-alt near 90°, cos(alt)→0 and azimuth loses all resolution
@@ -392,7 +587,9 @@ public static class Alignment
         var starResiduals = new List<StarResidualInfo>();
         for (int i = 0; i < _points.Count; i++)
         {
-            double err = ComputePointResidual(_alignmentMatrix!, allSkyVecs[i], allMountVecs[i]);
+            double err = _isAffineMatrix
+                ? ComputePointResidualAffine(_alignmentMatrix!, allSkyVecs[i], allMountVecs[i])
+                : ComputePointResidual(_alignmentMatrix!, allSkyVecs[i], allMountVecs[i]);
 
             bool isRejected = rejected.Contains(i);
             string tag = isRejected ? " [EXCLUDED]" : "";
@@ -421,13 +618,20 @@ public static class Alignment
 
         Logger.Notice($"  Average residual: {avgResidual * 60:F1}' ({avgResidual:F3}°) ≈ {avgPixels:F0} pixels @ 28mm");
 
-        // Step loss warning — only for non-zenith pairs
-        if (maxPairSepError > 0.3)
+        // Step loss warning — only meaningful when using a rotation matrix.
+        // Under affine alignment, pairwise separation differences are EXPECTED:
+        // the affine model captures axis scale errors / non-orthogonality,
+        // so what looks like "step loss" is actually the distortion being corrected.
+        if (maxPairSepError > 0.3 && !_isAffineMatrix)
         {
             Logger.Warn($"  *** STEP LOSS DETECTED: worst active pair Δ={maxPairSepError:F2}° ({Math.Abs(maxStepLossPct):F1}% loss) ***");
             Logger.Warn($"  *** Mount encoder positions don't match true star separations ***");
             Logger.Warn($"  *** TIP: Use stars closer in AZIMUTH to reduce Z-axis slew distance ***");
             Logger.Warn($"  *** TIP: Warm up the Z bearing by slewing back and forth before calibrating ***");
+        }
+        else if (maxPairSepError > 0.3 && _isAffineMatrix)
+        {
+            Logger.Notice($"  Pairwise separations differ by up to {maxPairSepError:F2}° ({Math.Abs(maxStepLossPct):F1}%) — captured by affine model");
         }
 
         // Quality assessment — avg residual is the SOLE quality gate.
@@ -877,6 +1081,122 @@ public static class Alignment
     }
 
     /// <summary>
+    /// Compute a general affine (3×3) transformation matrix A such that A * sky_i ≈ mount_i.
+    /// For N=3 this is an exact solve (zero residuals); for N>3 it's least-squares.
+    /// Unlike ComputeRotationMatrixSVD, this captures axis scale errors, gear ratio
+    /// inaccuracies, and non-orthogonality — not just rotation.
+    /// The output vector A*sky is NOT guaranteed to be a unit vector, so the caller
+    /// (or Pico) must normalize before extracting alt/az.
+    /// </summary>
+    private static float[]? ComputeAffineMatrix(
+        (double x, double y, double z)[] skyVecs,
+        (double x, double y, double z)[] mountVecs)
+    {
+        int n = skyVecs.Length;
+        if (n < 3) return null; // Need at least 3 for a 3×3 solve
+
+        // Build S (3×N) and M (3×N) matrices: columns are sky/mount vectors
+        // We want A such that A * S = M,  i.e.  A = M * S^T * (S * S^T)^{-1}
+
+        // Compute S * S^T (3×3 Gram matrix of sky vectors)
+        double[,] SSt = new double[3, 3];
+        for (int k = 0; k < n; k++)
+        {
+            double[] sv = { skyVecs[k].x, skyVecs[k].y, skyVecs[k].z };
+            for (int i = 0; i < 3; i++)
+                for (int j = 0; j < 3; j++)
+                    SSt[i, j] += sv[i] * sv[j];
+        }
+
+        // Invert SSt (3×3) using cofactor/adjugate method
+        double det = Det3x3(SSt);
+        if (Math.Abs(det) < 1e-12)
+        {
+            Logger.Warn("Affine matrix: sky vectors are coplanar (degenerate), falling back to SVD rotation");
+            return null;
+        }
+
+        // Cofactor matrix (transposed = adjugate)
+        double[,] adj = new double[3, 3];
+        adj[0, 0] =  (SSt[1, 1] * SSt[2, 2] - SSt[1, 2] * SSt[2, 1]);
+        adj[0, 1] = -(SSt[0, 1] * SSt[2, 2] - SSt[0, 2] * SSt[2, 1]);
+        adj[0, 2] =  (SSt[0, 1] * SSt[1, 2] - SSt[0, 2] * SSt[1, 1]);
+        adj[1, 0] = -(SSt[1, 0] * SSt[2, 2] - SSt[1, 2] * SSt[2, 0]);
+        adj[1, 1] =  (SSt[0, 0] * SSt[2, 2] - SSt[0, 2] * SSt[2, 0]);
+        adj[1, 2] = -(SSt[0, 0] * SSt[1, 2] - SSt[0, 2] * SSt[1, 0]);
+        adj[2, 0] =  (SSt[1, 0] * SSt[2, 1] - SSt[1, 1] * SSt[2, 0]);
+        adj[2, 1] = -(SSt[0, 0] * SSt[2, 1] - SSt[0, 1] * SSt[2, 0]);
+        adj[2, 2] =  (SSt[0, 0] * SSt[1, 1] - SSt[0, 1] * SSt[1, 0]);
+
+        double[,] SStInv = new double[3, 3];
+        for (int i = 0; i < 3; i++)
+            for (int j = 0; j < 3; j++)
+                SStInv[i, j] = adj[i, j] / det;
+
+        // Compute M * S^T (3×3)
+        double[,] MSt = new double[3, 3];
+        for (int k = 0; k < n; k++)
+        {
+            double[] sv = { skyVecs[k].x, skyVecs[k].y, skyVecs[k].z };
+            double[] mv = { mountVecs[k].x, mountVecs[k].y, mountVecs[k].z };
+            for (int i = 0; i < 3; i++)
+                for (int j = 0; j < 3; j++)
+                    MSt[i, j] += mv[i] * sv[j];
+        }
+
+        // A = M * S^T * (S * S^T)^{-1}
+        double[,] A = Multiply(MSt, SStInv);
+
+        // Sanity check: compute singular values to verify the matrix is reasonable.
+        // SVs should be in [0.7, 1.4] — a mount can have ~30% gear/orthogonality error
+        // at most; anything beyond that is a degenerate fit (e.g. stars near zenith
+        // where alt-az space collapses), not real physical distortion.
+        var (_, sigma, _) = SVD3x3(A);
+        double detA = Det3x3(A);
+        double minSV = Math.Min(sigma[0], Math.Min(sigma[1], sigma[2]));
+        double maxSV = Math.Max(sigma[0], Math.Max(sigma[1], sigma[2]));
+
+        Logger.Notice($"  Affine matrix: det={detA:F4}, singular values=[{sigma[0]:F3}, {sigma[1]:F3}, {sigma[2]:F3}]");
+
+        if (minSV < 0.7 || maxSV > 1.4)
+        {
+            Logger.Warn($"  Affine matrix has extreme distortion (SVs [{minSV:F3}, {maxSV:F3}]), likely degenerate star geometry");
+            Logger.Warn($"  Expected range [0.7, 1.4] — falling back to SVD rotation");
+            return null;
+        }
+
+        // Log non-rotation magnitude for diagnostics
+        double nonRotation = Math.Max(Math.Abs(sigma[0] - 1.0), Math.Max(Math.Abs(sigma[1] - 1.0), Math.Abs(sigma[2] - 1.0)));
+        if (nonRotation > 0.02)
+            Logger.Notice($"  Mount has {nonRotation * 100:F1}% axis distortion (gear/orthogonality error) — affine model corrects this");
+        else
+            Logger.Notice($"  Mount is well-calibrated (distortion <2%) — affine and rotation give similar results");
+
+        return new float[]
+        {
+            (float)A[0, 0], (float)A[0, 1], (float)A[0, 2],
+            (float)A[1, 0], (float)A[1, 1], (float)A[1, 2],
+            (float)A[2, 0], (float)A[2, 1], (float)A[2, 2]
+        };
+    }
+
+    /// <summary>
+    /// Compute the angular residual (degrees) between A*sky (normalized) and mount.
+    /// Works for both rotation matrices and affine matrices.
+    /// </summary>
+    private static double ComputePointResidualAffine(float[] matrix,
+        (double x, double y, double z) sky, (double x, double y, double z) mount)
+    {
+        double rx = matrix[0] * sky.x + matrix[1] * sky.y + matrix[2] * sky.z;
+        double ry = matrix[3] * sky.x + matrix[4] * sky.y + matrix[5] * sky.z;
+        double rz = matrix[6] * sky.x + matrix[7] * sky.y + matrix[8] * sky.z;
+        // Normalize the result (no-op for rotation, essential for affine)
+        double norm = Math.Sqrt(rx * rx + ry * ry + rz * rz);
+        if (norm > 1e-10) { rx /= norm; ry /= norm; rz /= norm; }
+        return Math.Acos(Math.Max(-1.0, Math.Min(1.0, rx * mount.x + ry * mount.y + rz * mount.z))) * 180.0 / Math.PI;
+    }
+
+    /// <summary>
     /// Compute SVD of a 3x3 matrix using Jacobi eigenvalue iterations on H^T*H.
     /// Returns (U, sigma, V) where H = U * diag(sigma) * V^T.
     /// </summary>
@@ -1083,18 +1403,165 @@ public static class Alignment
         double mx = m[0]*targetSky.x + m[1]*targetSky.y + m[2]*targetSky.z;
         double my = m[3]*targetSky.x + m[4]*targetSky.y + m[5]*targetSky.z;
         double mz = m[6]*targetSky.x + m[7]*targetSky.y + m[8]*targetSky.z;
+        // Normalize result vector (no-op for rotation, essential for affine)
+        double norm = Math.Sqrt(mx * mx + my * my + mz * mz);
+        if (norm > 1e-10) { mx /= norm; my /= norm; mz /= norm; }
         double predAlt = Math.Asin(Math.Max(-1.0, Math.Min(1.0, mz))) * 180.0 / Math.PI;
         double predAz  = Math.Atan2(my, mx) * 180.0 / Math.PI;
         long predXArcsec = (long)(predAlt * 3600);
         long predZArcsec = (long)(predAz  * 3600);
         Logger.Notice($"Predicted initial mount position: X={predXArcsec} arcsec ({predAlt:F2}°), Z={predZArcsec} arcsec ({predAz:F2}°)");
+        if (_isAffineMatrix)
+            Logger.Notice($"  (Using affine alignment — Pico MUST normalize mount vector)");
         if (predAlt > 80.0)
             Logger.Warn($"  *** Target is near ZENITH (alt={predAlt:F1}°) — tracking accuracy degrades significantly above 80°. Choose a lower target if possible. ***");
+
+        // Extrapolation warning: estimate reliability based on calibration coverage
+        if (_activeIndices.Count >= 2 && _points.Count >= 2)
+        {
+            // Compute angular distance from target to each active calibration star
+            double nearestDist = double.MaxValue;
+            int nearestIdx = -1;
+            for (int ai = 0; ai < _activeIndices.Count; ai++)
+            {
+                int idx = _activeIndices[ai];
+                var calSky = CelestialToUnitVector(_points[idx].RA, _points[idx].Dec, refDateTime, _points[idx].TimeUtc);
+                double dot = targetSky.x * calSky.x + targetSky.y * calSky.y + targetSky.z * calSky.z;
+                double dist = Math.Acos(Math.Max(-1.0, Math.Min(1.0, dot))) * 180.0 / Math.PI;
+                if (dist < nearestDist)
+                {
+                    nearestDist = dist;
+                    nearestIdx = idx;
+                }
+            }
+
+            // Compute calibration baseline (max separation among active stars)
+            double maxBaseline = 0;
+            for (int ai = 0; ai < _activeIndices.Count; ai++)
+            {
+                for (int aj = ai + 1; aj < _activeIndices.Count; aj++)
+                {
+                    int ii = _activeIndices[ai], jj = _activeIndices[aj];
+                    var si = CelestialToUnitVector(_points[ii].RA, _points[ii].Dec, refDateTime, _points[ii].TimeUtc);
+                    var sj = CelestialToUnitVector(_points[jj].RA, _points[jj].Dec, refDateTime, _points[jj].TimeUtc);
+                    double d = Math.Acos(Math.Max(-1.0, Math.Min(1.0,
+                        si.x * sj.x + si.y * sj.y + si.z * sj.z))) * 180.0 / Math.PI;
+                    if (d > maxBaseline) maxBaseline = d;
+                }
+            }
+
+            double extrapRatio = (maxBaseline > 1.0) ? nearestDist / (maxBaseline * 0.5) : nearestDist;
+            Logger.Notice($"  Target is {nearestDist:F1}° from nearest calibration star (star{nearestIdx + 1}), baseline={maxBaseline:F1}°, extrapolation={extrapRatio:F1}×");
+
+            if (extrapRatio > 3.0)
+            {
+                Logger.Warn($"  *** EXTREME EXTRAPOLATION ({extrapRatio:F1}×) — expect LARGE pointing error ***");
+                Logger.Warn($"  *** Add calibration stars near the target region, or use 3+ stars for affine alignment ***");
+            }
+            else if (extrapRatio > 1.5)
+            {
+                Logger.Warn($"  *** EXTRAPOLATION WARNING ({extrapRatio:F1}×) — pointing accuracy degrades outside calibration zone ***");
+                Logger.Warn($"  *** TIP: Calibrate with 3+ stars spread across the sky for best results ***");
+            }
+            else if (extrapRatio > 1.0)
+            {
+                Logger.Notice($"  Target is slightly outside calibration zone — accuracy may be reduced");
+            }
+
+            // Estimate model residual at the tracked target by checking nearest calibration star's residual
+            if (nearestIdx >= 0)
+            {
+                const double PLATE_SCALE = 43.7; // arcsec per pixel
+                var calSky = CelestialToUnitVector(_points[nearestIdx].RA, _points[nearestIdx].Dec, refDateTime, _points[nearestIdx].TimeUtc);
+                var calMount = MountToUnitVector(_points[nearestIdx].MountX, _points[nearestIdx].MountY, _points[nearestIdx].MountZ);
+                double calResidual = _isAffineMatrix
+                    ? ComputePointResidualAffine(_alignmentMatrix!, calSky, calMount)
+                    : ComputePointResidual(_alignmentMatrix!, calSky, calMount);
+                double calResidPx = calResidual * 3600.0 / PLATE_SCALE;
+                if (calResidPx > 3.0)
+                {
+                    Logger.Notice($"  Nearest calibration star (star{nearestIdx + 1}) has {calResidual * 60:F1}' ({calResidPx:F0}px) model residual");
+                    Logger.Notice($"  This is the expected centering accuracy — NOT a tracking rate error");
+                }
+            }
+        }
+
+        // ============================================================
+        // Local affine optimization: when the global affine has non-zero
+        // residuals (non-linear mount distortion), compute a locally-
+        // optimized affine matrix using the 3 nearest calibration stars.
+        // The global matrix is the best linear fit across ALL stars, but
+        // with ~20% distortion the mapping is non-linear — a local fit
+        // through 3 nearby stars interpolates much more accurately.
+        // ============================================================
+        float[] trackingMatrix = _alignmentMatrix!;
+
+        if (_isAffineMatrix && _activeIndices.Count >= 4)
+        {
+            const double LOCAL_PLATE_SCALE = 43.7; // arcsec per pixel
+
+            // Compute distance from target to each active calibration star
+            var starDistances = new List<(int idx, double dist)>();
+            for (int ai = 0; ai < _activeIndices.Count; ai++)
+            {
+                int idx = _activeIndices[ai];
+                var calSky = CelestialToUnitVector(_points[idx].RA, _points[idx].Dec, refDateTime, _points[idx].TimeUtc);
+                double dot = targetSky.x * calSky.x + targetSky.y * calSky.y + targetSky.z * calSky.z;
+                double dist = Math.Acos(Math.Max(-1.0, Math.Min(1.0, dot))) * 180.0 / Math.PI;
+                starDistances.Add((idx, dist));
+            }
+            starDistances.Sort((a, b) => a.dist.CompareTo(b.dist));
+
+            // Select 3 nearest stars for local affine (exact solve → 0 residuals at those 3)
+            int localCount = 3;
+            var localSky = new (double x, double y, double z)[localCount];
+            var localMount = new (double x, double y, double z)[localCount];
+            var localIndices = new int[localCount];
+
+            for (int i = 0; i < localCount; i++)
+            {
+                int idx = starDistances[i].idx;
+                localIndices[i] = idx;
+                localSky[i] = CelestialToUnitVector(_points[idx].RA, _points[idx].Dec, refDateTime, _points[idx].TimeUtc);
+                localMount[i] = MountToUnitVector(_points[idx].MountX, _points[idx].MountY, _points[idx].MountZ);
+            }
+
+            float[]? localMatrix = ComputeAffineMatrix(localSky, localMount);
+            if (localMatrix != null)
+            {
+                // Compare global vs local residuals at the 3 nearest stars
+                double globalResidSum = 0;
+                for (int i = 0; i < localCount; i++)
+                    globalResidSum += ComputePointResidualAffine(_alignmentMatrix!, localSky[i], localMount[i]);
+                double globalAvgNear = globalResidSum / localCount;
+                double globalAvgPx = globalAvgNear * 3600.0 / LOCAL_PLATE_SCALE;
+
+                // Compute position shift between global and local prediction
+                double lmx = localMatrix[0]*targetSky.x + localMatrix[1]*targetSky.y + localMatrix[2]*targetSky.z;
+                double lmy = localMatrix[3]*targetSky.x + localMatrix[4]*targetSky.y + localMatrix[5]*targetSky.z;
+                double lmz = localMatrix[6]*targetSky.x + localMatrix[7]*targetSky.y + localMatrix[8]*targetSky.z;
+                double lnorm = Math.Sqrt(lmx*lmx + lmy*lmy + lmz*lmz);
+                if (lnorm > 1e-10) { lmx /= lnorm; lmy /= lnorm; lmz /= lnorm; }
+                // Angular shift between global and local predictions
+                double shiftDot = mx*lmx + my*lmy + mz*lmz;
+                double shiftDeg = Math.Acos(Math.Max(-1.0, Math.Min(1.0, shiftDot))) * 180.0 / Math.PI;
+                double shiftPx = shiftDeg * 3600.0 / LOCAL_PLATE_SCALE;
+
+                Logger.Notice($"  Local affine from 3 nearest stars (star{localIndices[0]+1} @{starDistances[0].dist:F0}°, " +
+                              $"star{localIndices[1]+1} @{starDistances[1].dist:F0}°, star{localIndices[2]+1} @{starDistances[2].dist:F0}°):");
+                Logger.Notice($"    Global matrix residual at 3 nearest: {globalAvgNear * 60:F1}' ({globalAvgPx:F0}px)");
+                Logger.Notice($"    Local matrix residual at 3 nearest: 0.0' (exact fit)");
+                Logger.Notice($"    Predicted position shift: {shiftDeg * 60:F1}' ({shiftPx:F0}px) vs global matrix");
+
+                trackingMatrix = localMatrix;
+                Logger.Notice($"  *** Using LOCAL affine for tracking — handles non-linear mount distortion ***");
+            }
+        }
 
         return await UartClient.Client.StartCelestialTracking(
             targetRA, 
             targetDec, 
-            _alignmentMatrix!, 
+            trackingMatrix, 
             refTime, 
             Latitude
         );

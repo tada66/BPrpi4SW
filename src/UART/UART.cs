@@ -506,7 +506,7 @@ public sealed class UartClient : IDisposable
     /// </summary>
     /// <param name="targetRA">Right Ascension in hours (0.0 to 24.0)</param>
     /// <param name="targetDec">Declination in degrees (-90 to +90)</param>
-    /// <param name="alignMatrix">3x3 rotation matrix (9 floats, row-major) from alignment</param>
+    /// <param name="alignMatrix">3x3 alignment matrix (9 floats, row-major) — may be rotation or affine</param>
     /// <param name="refTime">Unix timestamp (UTC) when tracking starts</param>
     /// <param name="latitude">Observer latitude in degrees</param>
     public Task<bool> StartCelestialTracking(float targetRA, float targetDec, float[] alignMatrix, long refTime, float latitude)
