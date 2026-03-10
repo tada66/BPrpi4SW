@@ -65,7 +65,8 @@ public class Message
     private static readonly JsonSerializerOptions _opts = new()
     {
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
-        PropertyNamingPolicy = JsonNamingPolicy.CamelCase
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        NumberHandling = JsonNumberHandling.AllowReadingFromString | JsonNumberHandling.AllowNamedFloatingPointLiterals
     };
 
     public string Serialize() => JsonSerializer.Serialize(this, _opts);
@@ -272,7 +273,8 @@ public record AutoCenterPayload(
 
 public record AutoCalibratePayload(
     [property: JsonPropertyName("altSteps")] int AltSteps = 4,
-    [property: JsonPropertyName("azSteps")] int AzSteps = 5
+    [property: JsonPropertyName("azSteps")] int AzSteps = 5,
+    [property: JsonPropertyName("wideSweep")] bool WideSweep = true // Added WideSweep option
 );
 
 public record GuidedTrackingPayload(
@@ -283,7 +285,9 @@ public record GuidedTrackingPayload(
 
 public record PlateSolveConfigPayload(
     [property: JsonPropertyName("focalLengthMm")] float? FocalLengthMm = null,
-    [property: JsonPropertyName("pixelSizeUm")] float? PixelSizeUm = null
+    [property: JsonPropertyName("pixelSizeUm")] float? PixelSizeUm = null,
+    [property: JsonPropertyName("focalLength")] float? FocalLength = null,
+    [property: JsonPropertyName("pixelSize")] float? PixelSize = null
 );
 
 #endregion

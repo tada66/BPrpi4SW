@@ -290,7 +290,7 @@ public class MountController : IDisposable
             try
             {
                 var result = await Calibration.AutoCalibrateAsync(
-                    payload.AltSteps, payload.AzSteps,
+                    payload.AltSteps, payload.AzSteps, payload.WideSweep,
                     ct: ct);
 
                 if (_wsServer.HasClient)
@@ -409,15 +409,20 @@ public class MountController : IDisposable
 
     public object ConfigurePlateSolver(PlateSolveConfigPayload payload)
     {
-        if (payload.FocalLengthMm.HasValue)
-            PlateSolver.FocalLengthMm = payload.FocalLengthMm.Value;
-        if (payload.PixelSizeUm.HasValue)
-            PlateSolver.PixelSizeUm = payload.PixelSizeUm.Value;
+        var fl = payload.FocalLengthMm ?? payload.FocalLength;
+        var px = payload.PixelSizeUm ?? payload.PixelSize;
+
+        if (fl.HasValue)
+            PlateSolver.FocalLengthMm = fl.Value;
+        if (px.HasValue)
+            PlateSolver.PixelSizeUm = px.Value;
 
         return new
         {
             focalLengthMm = PlateSolver.FocalLengthMm,
+            focalLength = PlateSolver.FocalLengthMm,
             pixelSizeUm = PlateSolver.PixelSizeUm,
+            pixelSize = PlateSolver.PixelSizeUm,
             plateScaleArcsecPerPx = Math.Round(PlateSolver.PlateScale, 2)
         };
     }

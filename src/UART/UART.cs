@@ -209,7 +209,7 @@ public sealed class UartClient : IDisposable
                 try
                 {
                     bool result = await tcs.Task;
-                    Logger.Info($"Command ACKed");
+                    Logger.Debug($"Command ACKed");
                     return result;
                 }
                 catch (TaskCanceledException)
@@ -407,7 +407,6 @@ public sealed class UartClient : IDisposable
                         int y = BitConverter.ToInt32(data, 4);
                         int z = BitConverter.ToInt32(data, 8);
 
-                        Console.WriteLine($"Positions: X={x}, Y={y}, Z={z} arcseconds");
                         PositionReceived?.Invoke(x, y, z);
                     }
                     catch (Exception e)

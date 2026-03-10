@@ -34,6 +34,7 @@ public static class HotspotManager
     /// </summary>
     public static async Task<string> EnsureNetworkAsync()
     {
+        Thread.Sleep(5000); // Wait a moment for any interfaces to come up
         string? existingIp = GetRoutableIpAddress();
 
         if (existingIp != null)

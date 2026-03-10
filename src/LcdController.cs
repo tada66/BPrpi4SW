@@ -46,7 +46,7 @@ public class LcdController : IDisposable
         {
             Logger.Error($"Failed to initialize LCD: {ex.Message}");
         }
-
+        WriteLine(0, "Initializing...");
         // Start 1-second cycling for rows 1 and 2
         _cycleTimer = new Timer(OnCycleTick, null, 1500, 1500);
     }

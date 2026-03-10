@@ -10,8 +10,10 @@ using System.Threading.Tasks;
 /// non-orthogonality, and flexure — or falls back to SVD rotation if the
 /// mount geometry is close to ideal.
 /// </summary>
-public static class Alignment
+public static partial class Calibration
 {
+    public static event Action<AutoProgressInfo>? CalibrationUpdated;
+
     /// <summary>
     /// An alignment point: a known star's celestial coords + the mount's encoder readings when pointed at it.
     /// </summary>
@@ -23,17 +25,6 @@ public static class Alignment
         public int MountY { get; set; }     // Mount Y encoder (arcseconds)
         public int MountZ { get; set; }     // Mount Z encoder (arcseconds)
         public DateTime TimeUtc { get; set; } // Time when alignment was taken
-    }
-
-    /// <summary>
-    /// A catalog star entry for quick selection during alignment.
-    /// </summary>
-    public class CatalogStar
-    {
-        public string Name { get; set; } = "";
-        public float RA { get; set; }    // hours
-        public float Dec { get; set; }   // degrees
-        public float Magnitude { get; set; }
     }
 
     /// <summary>
@@ -61,29 +52,15 @@ public static class Alignment
         public string? ExclusionReason { get; set; }
     }
 
-    // Bright star catalog for alignment (visible from northern mid-latitudes)
-    public static readonly List<CatalogStar> StarCatalog = new()
+    public class AutoProgressInfo
     {
-        // Ursa Major (Big Dipper) — easy to find
-        new() { Name = "Dubhe",     RA = 11.062f, Dec = 61.751f,  Magnitude = 1.79f },
-        new() { Name = "Merak",     RA = 11.031f, Dec = 56.382f,  Magnitude = 2.37f },
-        new() { Name = "Phecda",    RA = 11.897f, Dec = 53.695f,  Magnitude = 2.44f },
-        new() { Name = "Megrez",    RA = 12.257f, Dec = 57.033f,  Magnitude = 3.31f },
-        new() { Name = "Alioth",    RA = 12.900f, Dec = 55.959f,  Magnitude = 1.77f },
-        new() { Name = "Mizar",     RA = 13.399f, Dec = 54.925f,  Magnitude = 2.04f },
-        new() { Name = "Alkaid",    RA = 13.792f, Dec = 49.313f,  Magnitude = 1.86f },
-        // Other bright stars
-        new() { Name = "Polaris",   RA = 2.530f,  Dec = 89.264f,  Magnitude = 1.98f },
-        new() { Name = "Capella",   RA = 5.278f,  Dec = 45.998f,  Magnitude = 0.08f },
-        new() { Name = "Betelgeuse",RA = 5.919f,  Dec = 7.407f,   Magnitude = 0.42f },
-        new() { Name = "Sirius",    RA = 6.752f,  Dec = -16.716f, Magnitude = -1.46f },
-        new() { Name = "Procyon",   RA = 7.655f,  Dec = 5.225f,   Magnitude = 0.34f },
-        new() { Name = "Regulus",   RA = 10.140f, Dec = 11.967f,  Magnitude = 1.40f },
-        new() { Name = "Arcturus",  RA = 14.261f, Dec = 19.182f,  Magnitude = -0.05f },
-        new() { Name = "Vega",      RA = 18.616f, Dec = 38.784f,  Magnitude = 0.03f },
-        new() { Name = "Deneb",     RA = 20.690f, Dec = 45.280f,  Magnitude = 1.25f },
-        new() { Name = "Altair",    RA = 19.846f, Dec = 8.868f,   Magnitude = 0.77f },
-    };
+        public int PointCount { get; set; }
+        public string Quality { get; set; } = "UNKNOWN";
+        public double AverageResidualArcmin { get; set; }
+        public string Message { get; set; } = "";
+        public int CurrentPosition { get; set; }
+        public int TotalPositions { get; set; }
+    }
 
     // Stored alignment points
     private static readonly List<AlignmentPoint> _points = new();
@@ -102,6 +79,13 @@ public static class Alignment
     // Last alignment computation result
     private static AlignmentResult? _lastResult = null;
 
+    // Mount encoder offset: corrects for unknown mount zero position.
+    // Motor arcseconds ≠ true alt/az — the offset maps raw encoder values to
+    // true sky angles so MountToUnitVector produces correct angular distances.
+    private static double _mountXOffsetArcsec = 0; // trueAlt*3600 - MountX
+    private static double _mountZOffsetArcsec = 0; // trueAz*3600 - MountZ
+    private static bool _mountOffsetKnown = false;
+
     // Observer location (degrees)
     public static float Latitude { get; set; } = 50.0f;   // Default to ~central Europe
     public static float Longitude { get; set; } = 14.42f;  // Default to ~Prague
@@ -119,9 +103,25 @@ public static class Alignment
         _isAffineMatrix = false;
         _activeIndices.Clear();
         _lastResult = null;
+        _mountXOffsetArcsec = 0;
+        _mountZOffsetArcsec = 0;
+        _mountOffsetKnown = false;
         CurrentTargetRa  = null;
         CurrentTargetDec = null;
         Logger.Notice("Alignment reset - all points cleared");
+    }
+
+    /// <summary>
+    /// Set the mount encoder offset from a known sky position and motor readings.
+    /// This corrects MountToUnitVector so that angular distances between mount
+    /// vectors match real sky angular distances.
+    /// </summary>
+    public static void SetMountOffset(double trueAltDeg, double trueAzDeg, int mountXArcsec, int mountZArcsec)
+    {
+        _mountXOffsetArcsec = trueAltDeg * 3600.0 - mountXArcsec;
+        _mountZOffsetArcsec = trueAzDeg * 3600.0 - mountZArcsec;
+        _mountOffsetKnown = true;
+        Logger.Notice($"Mount offset computed: Δalt={_mountXOffsetArcsec / 3600:F2}° ({_mountXOffsetArcsec:F0}\"), Δaz={_mountZOffsetArcsec / 3600:F2}° ({_mountZOffsetArcsec:F0}\")");
     }
 
     /// <summary>
@@ -129,8 +129,19 @@ public static class Alignment
     /// </summary>
     public static async Task AddAlignmentPointAsync(float starRA, float starDec)
     {
+        // Record time immediately — this is when the star is centered on the sensor.
+        // Any delay from GetAxisPositions is small, but be precise.
+        DateTime captureTime = DateTime.UtcNow;
+
         // Get current mount position
         var pos = await Tracker.GetAxisPositions();
+
+        // Auto-set mount offset from first alignment point
+        if (!_mountOffsetKnown)
+        {
+            var (alt, az) = ComputeAltAz(starRA, starDec, captureTime, Latitude, Longitude);
+            SetMountOffset(alt, az, pos.XArcsecs, pos.ZArcsecs);
+        }
         
         var point = new AlignmentPoint
         {
@@ -139,7 +150,7 @@ public static class Alignment
             MountX = pos.XArcsecs,
             MountY = pos.YArcsecs,
             MountZ = pos.ZArcsecs,
-            TimeUtc = DateTime.UtcNow
+            TimeUtc = captureTime
         };
         
         _points.Add(point);
@@ -155,8 +166,17 @@ public static class Alignment
     /// <summary>
     /// Add alignment point with manual mount position (for testing).
     /// </summary>
-    public static void AddAlignmentPoint(float starRA, float starDec, int mountX, int mountY, int mountZ)
+    public static void AddAlignmentPoint(float starRA, float starDec, int mountX, int mountY, int mountZ, DateTime? timeUtc = null)
     {
+        if(timeUtc == null)
+            timeUtc = DateTime.UtcNow;
+        // Auto-set mount offset from first alignment point
+        if (!_mountOffsetKnown)
+        {
+            var (alt, az) = ComputeAltAz(starRA, starDec, (DateTime)timeUtc, Latitude, Longitude);
+            SetMountOffset(alt, az, mountX, mountZ);
+        }
+
         var point = new AlignmentPoint
         {
             RA = starRA,
@@ -164,11 +184,11 @@ public static class Alignment
             MountX = mountX,
             MountY = mountY,
             MountZ = mountZ,
-            TimeUtc = DateTime.UtcNow
+            TimeUtc = (DateTime)timeUtc
         };
         
         _points.Add(point);
-        Logger.Notice($"Alignment point {_points.Count} added: RA={starRA:F2}h, Dec={starDec:F2}° => Mount({mountX}, {mountY}, {mountZ})");
+        Logger.Notice($"Alignment point {_points.Count} added: RA={starRA:F2}h, Dec={starDec:F2}° => Mount({mountX}, {mountY}, {mountZ}), Time={timeUtc:HH:mm:ss}");
         
         if (_points.Count >= 2)
         {
@@ -191,19 +211,116 @@ public static class Alignment
     {
         if (_points.Count < 2)
         {
-            Logger.Warn("Need at least 2 alignment points to compute matrix");
+            Logger.Error("Need at least 2 alignment points to compute matrix");
             return;
         }
 
         DateTime tRef = refTime ?? _points[^1].TimeUtc;
 
-        // Build sky and mount vectors for ALL points
+        // ============================================================
+        // Pre-filter: remove duplicate mount positions and step-loss victims
+        // ============================================================
+        // 1) Deduplicate: if two points have mount positions < 0.5° apart,
+        //    keep only the LATER observation (more recent = more reliable).
+        // 2) Step-loss detection: if sky separation is much smaller than mount
+        //    separation for a pair, one of them has step loss. Remove the star
+        //    that is inconsistent with the majority.
+        {
+            var keep = new bool[_points.Count];
+            for (int i = 0; i < _points.Count; i++) keep[i] = true;
+
+            // Pass 1: Mount-position deduplication (< 0.5° = 1800 arcsec)
+            for (int i = 0; i < _points.Count; i++)
+            {
+                if (!keep[i]) continue;
+                for (int j = i + 1; j < _points.Count; j++)
+                {
+                    if (!keep[j]) continue;
+                    double dx = _points[i].MountX - _points[j].MountX;
+                    double dz = _points[i].MountZ - _points[j].MountZ;
+                    double mountDistArcsec = Math.Sqrt(dx * dx + dz * dz);
+                    if (mountDistArcsec < 1800) // < 0.5°
+                    {
+                        // Keep the later observation, remove the earlier one
+                        Logger.Notice($"  Dedup: star{i + 1} and star{j + 1} have mount positions {mountDistArcsec / 3600:F2}° apart — removing star{i + 1} (earlier)");
+                        keep[i] = false;
+                        break;
+                    }
+                }
+            }
+
+            // Pass 2: Step-loss detection via pairwise sky/mount ratio.
+            // For each point, compute median (sky_sep / mount_sep) ratio across
+            // all pairs. Points with consistently low ratios have step loss.
+            // We look for points where sky barely moved despite mount moving 1°+.
+            var skyVecsTemp = new (double x, double y, double z)[_points.Count];
+            var mountVecsTemp = new (double x, double y, double z)[_points.Count];
+            for (int i = 0; i < _points.Count; i++)
+            {
+                skyVecsTemp[i] = CelestialToUnitVector(_points[i].RA, _points[i].Dec, tRef, _points[i].TimeUtc);
+                mountVecsTemp[i] = MountToUnitVectorCorrected(_points[i].MountX, _points[i].MountY, _points[i].MountZ);
+            }
+
+            // Check each kept point against all other kept points
+            for (int i = 0; i < _points.Count; i++)
+            {
+                if (!keep[i]) continue;
+                int badPairs = 0, totalPairs = 0;
+                for (int j = 0; j < _points.Count; j++)
+                {
+                    if (j == i || !keep[j]) continue;
+                    double skySep = Math.Acos(Math.Max(-1.0, Math.Min(1.0,
+                        skyVecsTemp[i].x * skyVecsTemp[j].x + skyVecsTemp[i].y * skyVecsTemp[j].y + skyVecsTemp[i].z * skyVecsTemp[j].z))) * 180.0 / Math.PI;
+                    double mountSep = Math.Acos(Math.Max(-1.0, Math.Min(1.0,
+                        mountVecsTemp[i].x * mountVecsTemp[j].x + mountVecsTemp[i].y * mountVecsTemp[j].y + mountVecsTemp[i].z * mountVecsTemp[j].z))) * 180.0 / Math.PI;
+                    if (mountSep > 1.0) // Only check pairs with significant mount separation
+                    {
+                        totalPairs++;
+                        if (skySep < mountSep * 0.3) // Sky moved < 30% of mount = step loss
+                            badPairs++;
+                    }
+                }
+                if (totalPairs >= 2 && badPairs >= totalPairs * 0.5) // Majority of pairs show step loss
+                {
+                    Logger.Warn($"  Step-loss filter: removing star{i + 1} — sky position inconsistent with mount position ({badPairs}/{totalPairs} pairs show step loss)");
+                    keep[i] = false;
+                }
+            }
+
+            // Rebuild _points list with only kept entries
+            int removed = keep.Count(k => !k);
+            if (removed > 0)
+            {
+                var filtered = new List<AlignmentPoint>();
+                for (int i = 0; i < _points.Count; i++)
+                {
+                    if (keep[i])
+                        filtered.Add(_points[i]);
+                }
+                Logger.Notice($"  Pre-filter: removed {removed} points, {filtered.Count} remaining");
+                if (filtered.Count < 2)
+                {
+                    Logger.Error("Pre-filter removed too many points — need at least 2. Keeping all.");
+                }
+                else
+                {
+                    _points.Clear();
+                    _points.AddRange(filtered);
+                }
+            }
+        }
+
+        // Build sky and mount vectors for ALL (filtered) points.
+        // Mount vectors use RAW encoder positions — step loss is self-canceling
+        // (the Pico uses the same encoder for tracking as for calibration, so
+        // systematic encoder errors cancel out).  The affine matrix absorbs any
+        // axis scale/skew differences between encoder space and the celestial sphere.
         var allSkyVecs = new (double x, double y, double z)[_points.Count];
         var allMountVecs = new (double x, double y, double z)[_points.Count];
         for (int i = 0; i < _points.Count; i++)
         {
             allSkyVecs[i] = CelestialToUnitVector(_points[i].RA, _points[i].Dec, tRef, _points[i].TimeUtc);
-            allMountVecs[i] = MountToUnitVector(_points[i].MountX, _points[i].MountY, _points[i].MountZ);
+            allMountVecs[i] = MountToUnitVectorCorrected(_points[i].MountX, _points[i].MountY, _points[i].MountZ);
         }
 
         // ============================================================
@@ -350,7 +467,7 @@ public static class Alignment
                 affineMountAll[i] = allMountVecs[i];
             }
 
-            float[]? affineMatrix = (_points.Count >= 3) ? ComputeAffineMatrix(affineSkyAll, affineMountAll) : null;
+            float[]? affineMatrix = (_points.Count >= 4) ? ComputeAffineMatrix(affineSkyAll, affineMountAll) : null;
             if (affineMatrix != null)
             {
                 // Compare affine vs rotation residuals on ALL stars
@@ -366,8 +483,10 @@ public static class Alignment
                 Logger.Notice($"  Rotation avg residual (all {_points.Count} stars): {rotAvgAll * 60:F1}'");
                 Logger.Notice($"  Affine avg residual (all {_points.Count} stars): {affAvgAll * 60:F1}'");
 
-                // If affine fits much better → mount has significant distortion
-                if (affAvgAll < rotAvgAll * 0.5 || (rotAvgAll > 0.167 && affAvgAll < 0.05))
+                // If affine fits better → mount has distortion that rotation can't capture.
+                // Threshold: affine avg must be at least 15% better than rotation,
+                // OR rotation is poor (>10') and affine is acceptable (<0.5°).
+                if (affAvgAll < rotAvgAll * 0.85 || (rotAvgAll > 0.167 && affAvgAll < 0.5))
                 {
                     Logger.Notice($"  *** AFFINE model fits {rotAvgAll / Math.Max(affAvgAll, 0.001):F0}× better than rotation ***");
                     Logger.Notice($"  *** This means the mount has axis scale/orthogonality errors ***");
@@ -639,9 +758,12 @@ public static class Alignment
 
         // Quality assessment — avg residual is the SOLE quality gate.
         // Pairwise separation is diagnostic-only (unreliable near zenith).
-        // avgResidual thresholds tuned for ~44 arcsec/pixel imaging:
-        //   <0.10°→<8px  <0.25°→<21px  <0.50°→<41px  >0.50°→>41px
-        if (avgResidual > 0.5)
+        // Thresholds tuned for wide-field (~50mm) imaging with ~24 arcsec/pixel:
+        //   EXCELLENT < 0.5° (< 75px)  — excellent for framing/tracking
+        //   OK        < 1.5° (< 225px) — usable, may need refinement
+        //   MARGINAL  < 3.0° (< 450px) — poor but usable for GOTO
+        //   REJECTED  ≥ 3.0°           — alignment is broken
+        if (avgResidual > 3.0)
         {
             Logger.Warn($"  *** ALIGNMENT REJECTED: pointing would be ≈{avgPixels:F0}+ pixels off ***");
             if (anyNearZenith)
@@ -651,7 +773,7 @@ public static class Alignment
             Logger.Warn($"  *** Please RESET and recalibrate with stars at 30°-70° altitude ***");
             _alignmentMatrix = null;
         }
-        else if (avgResidual > 0.25)
+        else if (avgResidual > 1.5)
         {
             Logger.Warn($"  Alignment MARGINAL: ~{avgPixels:F0}px pointing error");
             if (anyNearZenith)
@@ -659,7 +781,7 @@ public static class Alignment
             else
                 Logger.Warn($"  Consider resetting and recalibrating.");
         }
-        else if (avgResidual > 0.10)
+        else if (avgResidual > 0.5)
         {
             Logger.Notice($"  Alignment quality: OK (~{avgPixels:F0}px error)");
         }
@@ -680,9 +802,9 @@ public static class Alignment
         string quality;
         if (_alignmentMatrix == null)
             quality = "REJECTED";
-        else if (avgResidual > 0.25)
+        else if (avgResidual > 1.5)
             quality = "MARGINAL";
-        else if (avgResidual > 0.10)
+        else if (avgResidual > 0.5)
             quality = "OK";
         else
             quality = "EXCELLENT";
@@ -770,6 +892,7 @@ public static class Alignment
 
     /// <summary>
     /// Convert mount encoder positions (arcseconds) to a unit vector.
+    /// Uses RAW encoder values — no offset correction.
     /// Assumes: X=tilt (altitude), Z=pan (azimuth), Y=roll
     /// </summary>
     private static (double x, double y, double z) MountToUnitVector(int xArcsec, int yArcsec, int zArcsec)
@@ -785,6 +908,31 @@ public static class Alignment
         double z = Math.Sin(alt);
 
         return (x, y, z);
+    }
+
+    /// <summary>
+    /// Convert mount encoder positions to a unit vector with offset correction.
+    /// The offset maps raw encoder arcseconds to true alt/az, producing unit vectors
+    /// with correct angular distances. Used for alignment matrix fitting only —
+    /// the final matrix is compensated back to raw space for the Pico.
+    /// </summary>
+    private static (double x, double y, double z) MountToUnitVectorCorrected(int xArcsec, int yArcsec, int zArcsec)
+    {
+        double alt = (xArcsec + _mountXOffsetArcsec) * Math.PI / (180.0 * 3600.0);
+        double az = (zArcsec + _mountZOffsetArcsec) * Math.PI / (180.0 * 3600.0);
+        return (Math.Cos(alt) * Math.Cos(az), Math.Cos(alt) * Math.Sin(az), Math.Sin(alt));
+    }
+
+    /// <summary>
+    /// Multiply two 3×3 row-major matrices: R = A × B.
+    /// </summary>
+    private static float[] MultiplyMatrix3x3(float[] A, float[] B)
+    {
+        var R = new float[9];
+        for (int i = 0; i < 3; i++)
+            for (int j = 0; j < 3; j++)
+                R[i * 3 + j] = A[i * 3] * B[j] + A[i * 3 + 1] * B[3 + j] + A[i * 3 + 2] * B[6 + j];
+        return R;
     }
 
     #region Alt-Az / Sidereal Time Computation
@@ -859,27 +1007,77 @@ public static class Alignment
         return (alt * 180.0 / Math.PI, az * 180.0 / Math.PI);
     }
 
+    public static async Task MoveMotorWithOvershootAsync(int moveX, int moveZ)
+    {
+        // Apply BACKLASH OVERSHOOT logic
+        // Always approach Z-axis (azimuth) from a positive direction to mechanically eat the slack
+        int finalMoveX = moveX;
+        int finalMoveZ = moveZ;
+        int overshootZ = 0;
+        
+        if (moveZ < 0) 
+        {
+            overshootZ = -30000; // ~8.3 degrees overshoot
+            finalMoveZ = moveZ + overshootZ;
+        }
+
+        // Resume motors and move
+        await UartClient.Client.ResumeMotors();
+        await UartClient.Client.MoveRelative(Axis.X, finalMoveX);
+        await UartClient.Client.MoveRelative(Axis.Z, finalMoveZ);
+        
+        // Correct the Z overshoot if we applied one
+        if (overshootZ != 0) 
+        {
+            // We MUST wait for the main move to finish before sending the correction move!
+            // Otherwise the firmware cancels finalMoveZ immediately and only does the backtrack.
+            Logger.Debug($"MoveMotorWithOvershootAsync: Waiting for main trajectory before applying {-overshootZ}\" correction...");
+            await Tracker.WaitUntilMotorsStopAsync(); // Accurate wait based on polling real encoder positions
+
+            await UartClient.Client.MoveRelative(Axis.Z, -overshootZ);
+        }
+    }
+
     /// <summary>
     /// After recording alignment star 1, compute and automatically slew to the approximate
     /// mount position of alignment star 2. Uses alt-az computation to estimate the delta.
+    /// Picks the nearest alignment point as reference to minimize non-linear error.
+    /// Returns the actual arcsecond distances moved (for WaitForMoveComplete).
     /// </summary>
-    public static async Task GotoApproximateAsync(float targetRA, float targetDec)
+    public static async Task<(int moveX, int moveZ)> GotoApproximateAsync(float targetRA, float targetDec)
     {
         if (_points.Count < 1)
         {
             Logger.Warn("Need at least 1 alignment point before auto-goto.");
-            return;
+            return (0, 0);
         }
 
-        var star1 = _points[^1]; // use the most recent alignment point
-
-        // Compute alt-az of star 1 at the time it was recorded
-        var (alt1, az1) = ComputeAltAz(star1.RA, star1.Dec, star1.TimeUtc, Latitude, Longitude);
-
-        // Compute alt-az of target star NOW
+        // Compute target alt-az NOW
         var (alt2, az2) = ComputeAltAz(targetRA, targetDec, DateTime.UtcNow, Latitude, Longitude);
 
-        // Compute delta in arcseconds
+        // Pick the nearest alignment point as reference (minimizes non-linear error)
+        AlignmentPoint star1 = _points[0];
+        double bestDist = double.MaxValue;
+        for (int i = 0; i < _points.Count; i++)
+        {
+            var p = _points[i];
+            var (pAlt, pAz) = ComputeAltAz(p.RA, p.Dec, p.TimeUtc, Latitude, Longitude);
+            double dAlt = alt2 - pAlt;
+            double dAz = az2 - pAz;
+            if (dAz > 180.0) dAz -= 360.0;
+            if (dAz < -180.0) dAz += 360.0;
+            double dist = dAlt * dAlt + dAz * dAz;
+            if (dist < bestDist)
+            {
+                bestDist = dist;
+                star1 = p;
+            }
+        }
+
+        // Compute alt-az of reference point at the time it was recorded
+        var (alt1, az1) = ComputeAltAz(star1.RA, star1.Dec, star1.TimeUtc, Latitude, Longitude);
+
+        // Compute delta in arcseconds from star1's known position
         double deltaAltDeg = alt2 - alt1;
         double deltaAzDeg = az2 - az1;
 
@@ -887,11 +1085,17 @@ public static class Alignment
         if (deltaAzDeg > 180.0) deltaAzDeg -= 360.0;
         if (deltaAzDeg < -180.0) deltaAzDeg += 360.0;
 
-        int deltaX = (int)(deltaAltDeg * 3600.0);
-        int deltaZ = (int)(deltaAzDeg * 3600.0);
+        // Target motor position = star1's motor position + delta from star1
+        int targetMotorX = star1.MountX + (int)(deltaAltDeg * 3600.0);
+        int targetMotorZ = star1.MountZ + (int)(deltaAzDeg * 3600.0);
+
+        // Get current motor position and compute move from HERE
+        var currentPos = await Tracker.GetAxisPositions();
+        int moveX = targetMotorX - currentPos.XArcsecs;
+        int moveZ = targetMotorZ - currentPos.ZArcsecs;
 
         Logger.Notice($"Auto-goto: star1 alt-az=({alt1:F2}°, {az1:F2}°), target alt-az=({alt2:F2}°, {az2:F2}°)");
-        Logger.Notice($"  Moving ΔX={deltaX} arcsec ({deltaAltDeg:F2}°), ΔZ={deltaZ} arcsec ({deltaAzDeg:F2}°)");
+        Logger.Notice($"  Target motor=({targetMotorX}, {targetMotorZ}), current=({currentPos.XArcsecs}, {currentPos.ZArcsecs}), move=({moveX}, {moveZ})");
 
         if (alt2 < 5.0)
         {
@@ -902,72 +1106,10 @@ public static class Alignment
             Logger.Warn($"  Target is near zenith (alt={alt2:F1}°) — tracking accuracy will be limited.");
         }
 
-        // Resume motors and move
-        await UartClient.Client.ResumeMotors();
-        await UartClient.Client.MoveRelative(Axis.X, deltaX);
-        await UartClient.Client.MoveRelative(Axis.Z, deltaZ);
+        // Apply BACKLASH OVERSHOOT logic from previous iteration
+        await MoveMotorWithOvershootAsync(moveX, moveZ);
 
-        Console.WriteLine($"Mount moving to approximate position of target. Fine-tune when star is in view.");
-    }
-
-    /// <summary>
-    /// Print list of currently visible catalog stars (above horizon).
-    /// </summary>
-    public static void PrintVisibleStars()
-    {
-        DateTime now = DateTime.UtcNow;
-        double lst = ComputeLocalSiderealTime(now, Longitude);
-        Console.WriteLine($"\nVisible alignment stars (LST={lst:F2}h, Lat={Latitude:F1}°, Lon={Longitude:F1}°):");
-        Console.WriteLine($"{"#",-4} {"Name",-12} {"RA(h)",-8} {"Dec(°)",-8} {"Alt(°)",-8} {"Az(°)",-8} {"Mag",-5} {"Note",-10}");
-        Console.WriteLine(new string('-', 68));
-
-        int idx = 0;
-        foreach (var star in StarCatalog)
-        {
-            var (alt, az) = ComputeAltAz(star.RA, star.Dec, now, Latitude, Longitude);
-            if (alt > 10.0) // Only show stars above 10° altitude
-            {
-                string note = "";
-                if (alt >= 30.0 && alt <= 70.0)
-                    note = "★ IDEAL";
-                else if (alt > 75.0)
-                    note = "⚠ ZENITH";
-                else if (alt <= 20.0)
-                    note = "low";
-
-                Console.WriteLine($"{idx,-4} {star.Name,-12} {star.RA,-8:F3} {star.Dec,-8:F2} {alt,-8:F1} {az,-8:F1} {star.Magnitude,-5:F2} {note}");
-            }
-            idx++;
-        }
-        Console.WriteLine("  ★ IDEAL = best for calibration (30°-70° altitude)");
-        Console.WriteLine("  ⚠ ZENITH = near zenith, avoid for calibration (alt-az singularity)");
-        Console.WriteLine();
-    }
-
-    /// <summary>
-    /// Look up a star by name or index from the catalog.
-    /// Returns null if not found.
-    /// </summary>
-    public static CatalogStar? LookupStar(string input)
-    {
-        // Try parsing as catalog index
-        if (int.TryParse(input, out int idx) && idx >= 0 && idx < StarCatalog.Count)
-            return StarCatalog[idx];
-
-        // Try matching by name (case-insensitive, partial match)
-        input = input.Trim();
-        foreach (var star in StarCatalog)
-        {
-            if (star.Name.Equals(input, StringComparison.OrdinalIgnoreCase))
-                return star;
-        }
-        // Partial match
-        foreach (var star in StarCatalog)
-        {
-            if (star.Name.StartsWith(input, StringComparison.OrdinalIgnoreCase))
-                return star;
-        }
-        return null;
+        return (moveX, moveZ);
     }
 
     #endregion
@@ -1150,10 +1292,13 @@ public static class Alignment
         // A = M * S^T * (S * S^T)^{-1}
         double[,] A = Multiply(MSt, SStInv);
 
-        // Sanity check: compute singular values to verify the matrix is reasonable.
-        // SVs should be in [0.7, 1.4] — a mount can have ~30% gear/orthogonality error
-        // at most; anything beyond that is a degenerate fit (e.g. stars near zenith
-        // where alt-az space collapses), not real physical distortion.
+        // Check singular values for diagnostics.
+        // The mapping from equatorial unit vectors to mount spherical unit vectors
+        // is NOT a rotation — the cos(alt) factor in the mount's spherical formula
+        // creates angular distance distortion. At encoder altitude ~50°, azimuth
+        // distances are compressed by cos(50°)≈0.64, giving SVs well outside [0.9,1.1].
+        // This is normal mount geometry, NOT degenerate star geometry.
+        // Only reject truly degenerate cases (near-zero determinant or extreme SVs).
         var (_, sigma, _) = SVD3x3(A);
         double detA = Det3x3(A);
         double minSV = Math.Min(sigma[0], Math.Min(sigma[1], sigma[2]));
@@ -1161,17 +1306,18 @@ public static class Alignment
 
         Logger.Notice($"  Affine matrix: det={detA:F4}, singular values=[{sigma[0]:F3}, {sigma[1]:F3}, {sigma[2]:F3}]");
 
-        if (minSV < 0.7 || maxSV > 1.4)
+        if (minSV < 0.05 || maxSV > 20.0 || Math.Abs(detA) < 0.01)
         {
-            Logger.Warn($"  Affine matrix has extreme distortion (SVs [{minSV:F3}, {maxSV:F3}]), likely degenerate star geometry");
-            Logger.Warn($"  Expected range [0.7, 1.4] — falling back to SVD rotation");
+            Logger.Warn($"  Affine matrix is degenerate (SVs [{minSV:F3}, {maxSV:F3}], det={detA:F4}) — falling back to SVD rotation");
             return null;
         }
 
         // Log non-rotation magnitude for diagnostics
         double nonRotation = Math.Max(Math.Abs(sigma[0] - 1.0), Math.Max(Math.Abs(sigma[1] - 1.0), Math.Abs(sigma[2] - 1.0)));
-        if (nonRotation > 0.02)
-            Logger.Notice($"  Mount has {nonRotation * 100:F1}% axis distortion (gear/orthogonality error) — affine model corrects this");
+        if (nonRotation > 0.5)
+            Logger.Notice($"  Significant mount coordinate distortion ({nonRotation * 100:F0}%) — this is expected (cos(alt) effect in spherical coordinates)");
+        else if (nonRotation > 0.02)
+            Logger.Notice($"  Mount has {nonRotation * 100:F1}% axis distortion — affine model corrects this");
         else
             Logger.Notice($"  Mount is well-calibrated (distortion <2%) — affine and rotation give similar results");
 
@@ -1277,12 +1423,51 @@ public static class Alignment
         for (int i = 0; i < 3; i++)
             sigma[i] = Math.Sqrt(Math.Max(0.0, D[i, i]));
 
-        // Step 4: U = H * V * S^{-1}
+        // Step 4: Sort singular values in descending order
+        for (int i = 0; i < 2; i++)
+        {
+            int maxIdx = i;
+            for (int j = i + 1; j < 3; j++)
+                if (sigma[j] > sigma[maxIdx]) maxIdx = j;
+            
+            if (maxIdx != i)
+            {
+                double tempSig = sigma[i];
+                sigma[i] = sigma[maxIdx];
+                sigma[maxIdx] = tempSig;
+                for (int k = 0; k < 3; k++)
+                {
+                    double tempV = V[k, i];
+                    V[k, i] = V[k, maxIdx];
+                    V[k, maxIdx] = tempV;
+                }
+            }
+        }
+
+        // Step 5: U = H * V * S^{-1}
         double[,] HV = Multiply(H, V);
         double[,] U = new double[3, 3];
-        for (int i = 0; i < 3; i++)
-            for (int j = 0; j < 3; j++)
-                U[i, j] = sigma[j] > 1e-10 ? HV[i, j] / sigma[j] : 0.0;
+        for (int j = 0; j < 3; j++)
+        {
+            if (sigma[j] > 1e-10)
+            {
+                for (int i = 0; i < 3; i++) U[i, j] = HV[i, j] / sigma[j];
+            }
+            else
+            {
+                // If singular value is zero (coplanar points), construct orthogonal column
+                if (j == 2)
+                {
+                    U[0, 2] = U[1, 0] * U[2, 1] - U[2, 0] * U[1, 1];
+                    U[1, 2] = U[2, 0] * U[0, 1] - U[0, 0] * U[2, 1];
+                    U[2, 2] = U[0, 0] * U[1, 1] - U[1, 0] * U[0, 1];
+                }
+                else
+                {
+                    for (int i = 0; i < 3; i++) U[i, j] = 0;
+                }
+            }
+        }
 
         return (U, sigma, V);
     }
@@ -1358,14 +1543,6 @@ public static class Alignment
     public static AlignmentResult? LastResult => _lastResult;
 
     /// <summary>
-    /// Get the computed alignment matrix (or identity if not aligned).
-    /// </summary>
-    public static float[] GetAlignmentMatrix()
-    {
-        return _alignmentMatrix ?? new float[] { 1, 0, 0, 0, 1, 0, 0, 0, 1 };
-    }
-
-    /// <summary>
     /// Get number of alignment points collected.
     /// </summary>
     public static int PointCount => _points.Count;
@@ -1411,8 +1588,8 @@ public static class Alignment
         if (norm > 1e-10) { mx /= norm; my /= norm; mz /= norm; }
         double predAlt = Math.Asin(Math.Max(-1.0, Math.Min(1.0, mz))) * 180.0 / Math.PI;
         double predAz  = Math.Atan2(my, mx) * 180.0 / Math.PI;
-        long predXArcsec = (long)(predAlt * 3600);
-        long predZArcsec = (long)(predAz  * 3600);
+        long predXArcsec = (long)(predAlt * 3600) - (long)_mountXOffsetArcsec;
+        long predZArcsec = (long)(predAz  * 3600) - (long)_mountZOffsetArcsec;
         Logger.Notice($"Predicted initial mount position: X={predXArcsec} arcsec ({predAlt:F2}°), Z={predZArcsec} arcsec ({predAz:F2}°)");
         if (_isAffineMatrix)
             Logger.Notice($"  (Using affine alignment — Pico MUST normalize mount vector)");
@@ -1476,7 +1653,7 @@ public static class Alignment
             {
                 double PLATE_SCALE = PlateScale;
                 var calSky = CelestialToUnitVector(_points[nearestIdx].RA, _points[nearestIdx].Dec, refDateTime, _points[nearestIdx].TimeUtc);
-                var calMount = MountToUnitVector(_points[nearestIdx].MountX, _points[nearestIdx].MountY, _points[nearestIdx].MountZ);
+                var calMount = MountToUnitVectorCorrected(_points[nearestIdx].MountX, _points[nearestIdx].MountY, _points[nearestIdx].MountZ);
                 double calResidual = _isAffineMatrix
                     ? ComputePointResidualAffine(_alignmentMatrix!, calSky, calMount)
                     : ComputePointResidual(_alignmentMatrix!, calSky, calMount);
@@ -1526,7 +1703,7 @@ public static class Alignment
                 int idx = starDistances[i].idx;
                 localIndices[i] = idx;
                 localSky[i] = CelestialToUnitVector(_points[idx].RA, _points[idx].Dec, refDateTime, _points[idx].TimeUtc);
-                localMount[i] = MountToUnitVector(_points[idx].MountX, _points[idx].MountY, _points[idx].MountZ);
+                localMount[i] = MountToUnitVectorCorrected(_points[idx].MountX, _points[idx].MountY, _points[idx].MountZ);
             }
 
             float[]? localMatrix = ComputeAffineMatrix(localSky, localMount);
@@ -1562,920 +1739,14 @@ public static class Alignment
         }
 
         return await UartClient.Client.StartCelestialTracking(
-            targetRA, 
-            targetDec, 
-            trackingMatrix, 
-            refTime, 
-            Latitude
+            targetRA,
+            targetDec,
+            trackingMatrix,
+            refTime,
+            (float)Latitude
         );
     }
 
-    // ============================================================
-    //  Plate-Solve Assisted Operations
-    // ============================================================
-
-    /// <summary>
-    /// Reference to the camera instance used for plate-solve captures.
-    /// Must be set before calling AutoCenter / AutoCalibrate / GuidedTracking.
-    /// </summary>
-    public static Camera? SolveCamera { get; set; }
-
-    /// <summary>
-    /// Active guided-tracking cancellation source — allows stopping guided tracking.
-    /// </summary>
-    private static CancellationTokenSource? _guideCts;
-
-    /// <summary>
-    /// Auto-center on a target using plate solving.
-    /// Goto → capture → solve → measure error → correct → repeat until centered.
-    /// Each solved frame also becomes a calibration point, continuously improving the model.
-    /// </summary>
-    /// <param name="targetRA">Target RA in hours.</param>
-    /// <param name="targetDec">Target Dec in degrees.</param>
-    /// <param name="maxIterations">Maximum correction iterations (default 5).</param>
-    /// <param name="tolerancePx">Target centering tolerance in pixels (default 15).</param>
-    /// <param name="ct">Cancellation token.</param>
-    /// <returns>Result with final centering error, or null if solve failed.</returns>
-    public static async Task<AutoCenterResult?> AutoCenterAsync(
-        float targetRA, float targetDec,
-        int maxIterations = 5, double tolerancePx = 15.0,
-        CancellationToken ct = default)
-    {
-        if (SolveCamera == null || !SolveCamera.connected)
-        {
-            Logger.Warn("AutoCenter: no camera connected. Set Alignment.SolveCamera first.");
-            return null;
-        }
-
-        if (!IsAligned)
-        {
-            Logger.Warn("AutoCenter: mount not aligned. Need at least 2 alignment stars.");
-            return null;
-        }
-
-        double plateScale = PlateScale;
-        Logger.Notice($"AutoCenter: target RA={targetRA:F4}h, Dec={targetDec:F4}°, tolerance={tolerancePx:F0}px ({tolerancePx * plateScale:F0}\")");
-
-        // Initial goto using current alignment matrix
-        Logger.Notice("AutoCenter: starting initial tracking goto...");
-        bool trackOk = await StartTrackingAsync(targetRA, targetDec);
-        if (!trackOk)
-        {
-            Logger.Warn("AutoCenter: failed to start tracking");
-            return null;
-        }
-
-        // Wait for mount to settle after goto — estimate distance from current pointing
-        {
-            var lastPt = _points[^1];
-            var curAltAz = ComputeAltAz(lastPt.RA, lastPt.Dec, DateTime.UtcNow, Latitude, Longitude);
-            var tgtAltAz = ComputeAltAz(targetRA, targetDec, DateTime.UtcNow, Latitude, Longitude);
-            double maxDelta = Math.Max(Math.Abs(tgtAltAz.alt - curAltAz.alt), Math.Abs(tgtAltAz.az - curAltAz.az));
-            await WaitForMoveCompleteAsync((int)(maxDelta * 3600), ct);
-        }
-
-        // Save original camera settings to restore after
-        string? origIso = null;
-        string? origShutter = null;
-        try { origIso = SolveCamera.Iso.value.ToString(); } catch { }
-        try { origShutter = SolveCamera.shutterSpeed.value; } catch { }
-
-        double lastErrorPx = double.MaxValue;
-        int iteration = 0;
-
-        try
-        {
-            for (iteration = 1; iteration <= maxIterations; iteration++)
-            {
-                ct.ThrowIfCancellationRequested();
-
-                Logger.Notice($"AutoCenter: iteration {iteration}/{maxIterations}");
-
-                // Configure camera for a short plate-solve exposure
-                try
-                {
-                    SolveCamera.Iso.value = 3200;
-                    SolveCamera.shutterSpeed.value = "2";
-                }
-                catch (Exception ex)
-                {
-                    Logger.Warn($"AutoCenter: could not set camera params: {ex.Message}");
-                    // Continue anyway — current settings might work
-                }
-
-                // Capture image
-                string baseName = $"solve_{DateTime.Now:yyyyMMdd_HHmmss}";
-                string imagePath;
-                try
-                {
-                    imagePath = await Task.Run(() => SolveCamera.CaptureImage(baseName), ct);
-                    Logger.Notice($"AutoCenter: captured {Path.GetFileName(imagePath)}");
-                }
-                catch (Exception ex)
-                {
-                    Logger.Warn($"AutoCenter: capture failed: {ex.Message}");
-                    return null;
-                }
-
-                // Read mount position at capture time
-                var mountPos = await Tracker.GetAxisPositions();
-
-                // Plate solve with hint from alignment prediction
-                var solve = await PlateSolver.SolveAsync(imagePath, targetRA, targetDec, 30.0, ct);
-                if (solve == null)
-                {
-                    Logger.Warn("AutoCenter: plate solve failed — cannot determine pointing");
-                    // Clean up the solve image
-                    TryDeleteFile(imagePath);
-                    return new AutoCenterResult
-                    {
-                        Success = false,
-                        Iterations = iteration,
-                        FinalErrorPx = lastErrorPx,
-                        Message = "Plate solve failed"
-                    };
-                }
-
-                // Compute sky error
-                double dRaDeg = (targetRA - solve.RaCenterHours) * 15.0 * Math.Cos(targetDec * Math.PI / 180.0);
-                double dDecDeg = targetDec - solve.DecCenterDeg;
-                double errorDeg = Math.Sqrt(dRaDeg * dRaDeg + dDecDeg * dDecDeg);
-                double errorPx = errorDeg * 3600.0 / plateScale;
-                lastErrorPx = errorPx;
-
-                Logger.Notice($"AutoCenter: pointing error = {errorDeg * 60:F1}' ({errorPx:F0}px) " +
-                              $"[ΔRA={dRaDeg * 60:F1}', ΔDec={dDecDeg * 60:F1}']");
-
-                // Add this solved position as a calibration point (self-improving model)
-                AddAlignmentPoint(
-                    (float)solve.RaCenterHours, (float)solve.DecCenterDeg,
-                    mountPos.XArcsecs, mountPos.YArcsecs, mountPos.ZArcsecs);
-                Logger.Notice($"AutoCenter: added plate-solve calibration point (now {PointCount} total)");
-
-                // Check convergence
-                if (errorPx < tolerancePx)
-                {
-                    Logger.Notice($"AutoCenter: CENTERED in {iteration} iteration(s)! Error={errorPx:F1}px < {tolerancePx:F0}px");
-
-                    // Restart tracking with the improved alignment model
-                    await StartTrackingAsync(targetRA, targetDec);
-
-                    TryDeleteFile(imagePath);
-                    return new AutoCenterResult
-                    {
-                        Success = true,
-                        Iterations = iteration,
-                        FinalErrorPx = errorPx,
-                        FinalErrorArcmin = errorDeg * 60,
-                        SolvedRA = solve.RaCenterHours,
-                        SolvedDec = solve.DecCenterDeg,
-                        Message = $"Centered in {iteration} iteration(s)"
-                    };
-                }
-
-                // Apply correction: stop tracking, move mount, restart
-                Logger.Notice($"AutoCenter: correcting — ΔAlt={dDecDeg * 3600:F0}\", ΔAz={dRaDeg * 3600:F0}\"");
-                await UartClient.Client.StopAll();
-                await Task.Delay(500, ct);
-
-                // Convert sky error to mount correction
-                // Use the alignment matrix to map the sky-space error into mount-space
-                // For small corrections: just use alt-az deltas directly
-                var targetAltAz = ComputeAltAz(targetRA, targetDec, DateTime.UtcNow, Latitude, Longitude);
-                var actualAltAz = ComputeAltAz(solve.RaCenterHours, solve.DecCenterDeg, DateTime.UtcNow, Latitude, Longitude);
-
-                double corrAlt = targetAltAz.alt - actualAltAz.alt;  // degrees
-                double corrAz = targetAltAz.az - actualAltAz.az;     // degrees
-                // Handle azimuth wrapping
-                if (corrAz > 180.0) corrAz -= 360.0;
-                if (corrAz < -180.0) corrAz += 360.0;
-
-                int corrXArcsec = (int)(corrAlt * 3600.0);
-                int corrZArcsec = (int)(corrAz * 3600.0);
-
-                Logger.Notice($"AutoCenter: applying mount correction X={corrXArcsec}\", Z={corrZArcsec}\"");
-                await UartClient.Client.MoveRelative(Axis.X, corrXArcsec);
-                await UartClient.Client.MoveRelative(Axis.Z, corrZArcsec);
-
-                // Wait for move to complete (adaptive)
-                int maxCorr = Math.Max(Math.Abs(corrXArcsec), Math.Abs(corrZArcsec));
-                await WaitForMoveCompleteAsync(maxCorr, ct);
-
-                // Restart tracking with the improved alignment
-                await StartTrackingAsync(targetRA, targetDec);
-                await Task.Delay(2000, ct);
-
-                TryDeleteFile(imagePath);
-            }
-        }
-        catch (OperationCanceledException)
-        {
-            Logger.Notice("AutoCenter: cancelled");
-            return null;
-        }
-        finally
-        {
-            // Restore original camera settings
-            RestoreCameraSettings(origIso, origShutter);
-        }
-
-        Logger.Warn($"AutoCenter: did not converge after {maxIterations} iterations (last error={lastErrorPx:F1}px)");
-        return new AutoCenterResult
-        {
-            Success = false,
-            Iterations = maxIterations,
-            FinalErrorPx = lastErrorPx,
-            Message = $"Did not converge after {maxIterations} iterations"
-        };
-    }
-
-    /// <summary>
-    /// Automatic calibration: slew to a grid of positions AROUND the current pointing,
-    /// plate-solve each, and build a dense calibration map.
-    /// Requires at least 1 manual alignment point so we know where we are.
-    /// The grid uses small relative offsets (±spanDeg) from the current alt-az position
-    /// to keep movements safe and localized.
-    /// </summary>
-    /// <param name="altSteps">Number of altitude steps (default 3).</param>
-    /// <param name="azSteps">Number of azimuth steps (default 3).</param>
-    /// <param name="ct">Cancellation token.</param>
-    /// <returns>Result with number of successful solves.</returns>
-    public static async Task<AutoCalibrateResult?> AutoCalibrateAsync(
-        int altSteps = 3, int azSteps = 3,
-        CancellationToken ct = default)
-    {
-        if (SolveCamera == null || !SolveCamera.connected)
-        {
-            Logger.Warn("AutoCalibrate: no camera connected.");
-            return null;
-        }
-
-        if (_points.Count < 1)
-        {
-            Logger.Warn("AutoCalibrate: need at least 1 alignment point. Center a star manually first.");
-            return null;
-        }
-
-        int totalPositions = altSteps * azSteps;
-        Logger.Notice($"AutoCalibrate: scanning {totalPositions} positions ({altSteps} alt × {azSteps} az) around current pointing");
-
-        // ── Compute center of grid from the CURRENT mount pointing ──
-        var lastPt = _points[^1];
-        var (refAlt, refAz) = ComputeAltAz(lastPt.RA, lastPt.Dec, DateTime.UtcNow, Latitude, Longitude);
-        Logger.Notice($"AutoCalibrate: reference position alt={refAlt:F1}°, az={refAz:F1}°");
-
-        // Grid span: ±5° per step from center (so 3 steps → -5°, 0°, +5° = 10° span)
-        const double StepSpanDeg = 5.0;
-
-        // Build relative offsets centered on zero
-        double[] altOffsets = new double[altSteps];
-        for (int i = 0; i < altSteps; i++)
-            altOffsets[i] = altSteps == 1 ? 0.0
-                : -StepSpanDeg * (altSteps - 1) / 2.0 + StepSpanDeg * i;
-
-        double[] azOffsets = new double[azSteps];
-        for (int i = 0; i < azSteps; i++)
-            azOffsets[i] = azSteps == 1 ? 0.0
-                : -StepSpanDeg * (azSteps - 1) / 2.0 + StepSpanDeg * i;
-
-        // Save camera settings
-        string? origIso = null;
-        string? origShutter = null;
-        try { origIso = SolveCamera.Iso.value.ToString(); } catch { }
-        try { origShutter = SolveCamera.shutterSpeed.value; } catch { }
-
-        int solved = 0;
-        int failed = 0;
-        var sw = System.Diagnostics.Stopwatch.StartNew();
-
-        try
-        {
-            // Configure camera for plate solving
-            try
-            {
-                SolveCamera.Iso.value = 3200;
-                SolveCamera.shutterSpeed.value = "2";
-            }
-            catch (Exception ex)
-            {
-                Logger.Warn($"AutoCalibrate: could not set camera params: {ex.Message}");
-            }
-
-            int posNum = 0;
-            for (int ai = 0; ai < altSteps; ai++)
-            {
-                for (int azi = 0; azi < azSteps; azi++)
-                {
-                    ct.ThrowIfCancellationRequested();
-                    posNum++;
-
-                    double targetAlt = refAlt + altOffsets[ai];
-                    double targetAz = refAz + azOffsets[azi];
-
-                    // Safety: clamp altitude to [15°, 80°] to prevent crashes
-                    if (targetAlt < 15.0 || targetAlt > 80.0)
-                    {
-                        Logger.Notice($"AutoCalibrate: skipping position {posNum}/{totalPositions} — alt={targetAlt:F1}° outside safe range [15°,80°]");
-                        failed++;
-                        continue;
-                    }
-
-                    // Normalize azimuth to 0-360
-                    if (targetAz < 0) targetAz += 360.0;
-                    if (targetAz >= 360) targetAz -= 360.0;
-
-                    // Convert alt-az → RA/Dec for current time
-                    var (raH, decD) = AltAzToRaDec(targetAlt, targetAz, DateTime.UtcNow, Latitude, Longitude);
-
-                    // Compute move distance for logging and wait-time
-                    double moveAltDeg = Math.Abs(altOffsets[ai] - (ai > 0 || azi > 0 ? altOffsets[ai > 0 && azi == 0 ? ai - 1 : ai] : 0));
-                    double moveAzDeg = Math.Abs(azOffsets[azi] - (azi > 0 ? azOffsets[azi - 1] : 0));
-                    if (posNum == 1) { moveAltDeg = Math.Abs(altOffsets[ai]); moveAzDeg = Math.Abs(azOffsets[azi]); }
-
-                    Logger.Notice($"AutoCalibrate: position {posNum}/{totalPositions} — alt={targetAlt:F1}°, az={targetAz:F1}° (offset: Δalt={altOffsets[ai]:+0.0;-0.0}°, Δaz={azOffsets[azi]:+0.0;-0.0}°)");
-
-                    // Slew to position using relative moves from current
-                    await GotoApproximateAsync((float)raH, (float)decD);
-
-                    // Wait for movement to complete (adaptive, based on move size)
-                    double maxMoveDeg = Math.Max(Math.Abs(altOffsets[ai]), Math.Abs(azOffsets[azi])) + StepSpanDeg;
-                    await WaitForMoveCompleteAsync((int)(maxMoveDeg * 3600), ct);
-
-                    // Capture
-                    string baseName = $"cal_{DateTime.Now:yyyyMMdd_HHmmss}";
-                    string imagePath;
-                    try
-                    {
-                        imagePath = await Task.Run(() => SolveCamera.CaptureImage(baseName), ct);
-                    }
-                    catch (Exception ex)
-                    {
-                        Logger.Warn($"AutoCalibrate: capture failed at pos {posNum}: {ex.Message}");
-                        failed++;
-                        continue;
-                    }
-
-                    // Read mount position right after capture
-                    var mountPos = await Tracker.GetAxisPositions();
-
-                    // Plate solve with hint from expected position
-                    var solve = await PlateSolver.SolveAsync(imagePath, raH, decD, 30.0, ct);
-                    if (solve == null)
-                    {
-                        Logger.Warn($"AutoCalibrate: solve failed at pos {posNum}");
-                        failed++;
-                        TryDeleteFile(imagePath);
-                        continue;
-                    }
-
-                    // Add calibration point
-                    AddAlignmentPoint(
-                        (float)solve.RaCenterHours, (float)solve.DecCenterDeg,
-                        mountPos.XArcsecs, mountPos.YArcsecs, mountPos.ZArcsecs);
-                    solved++;
-                    Logger.Notice($"AutoCalibrate: position {posNum} solved — RA={solve.RaCenterHours:F4}h, Dec={solve.DecCenterDeg:F4}° (total points: {PointCount})");
-
-                    TryDeleteFile(imagePath);
-                }
-            }
-        }
-        catch (OperationCanceledException)
-        {
-            Logger.Notice("AutoCalibrate: cancelled");
-        }
-        finally
-        {
-            // Return to starting position
-            try
-            {
-                var (startRA, startDec) = AltAzToRaDec(refAlt, refAz, DateTime.UtcNow, Latitude, Longitude);
-                Logger.Notice("AutoCalibrate: returning to starting position...");
-                await GotoApproximateAsync((float)startRA, (float)startDec);
-                await WaitForMoveCompleteAsync((int)(StepSpanDeg * (Math.Max(altSteps, azSteps) - 1) * 3600), ct);
-            }
-            catch { }
-
-            RestoreCameraSettings(origIso, origShutter);
-        }
-
-        sw.Stop();
-        string quality = LastResult?.Quality ?? "UNKNOWN";
-        Logger.Notice($"AutoCalibrate: complete — {solved}/{totalPositions} positions solved, " +
-                      $"{failed} failed, alignment quality: {quality}, took {sw.Elapsed.TotalMinutes:F1} min");
-
-        return new AutoCalibrateResult
-        {
-            SolvedCount = solved,
-            FailedCount = failed,
-            TotalPositions = totalPositions,
-            TotalPoints = PointCount,
-            Quality = quality,
-            ElapsedSeconds = (int)sw.Elapsed.TotalSeconds
-        };
-    }
-
-    /// <summary>
-    /// Start tracked observation with periodic plate-solve guiding.
-    /// Combinesx auto-centering and periodic drift correction.
-    /// </summary>
-    /// <param name="targetRA">Target RA in hours.</param>
-    /// <param name="targetDec">Target Dec in degrees.</param>
-    /// <param name="guideIntervalSeconds">Seconds between guide corrections (default 60).</param>
-    /// <param name="ct">Cancellation token.</param>
-    public static async Task<AutoCenterResult?> StartGuidedTrackingAsync(
-        float targetRA, float targetDec,
-        int guideIntervalSeconds = 60,
-        CancellationToken ct = default)
-    {
-        // Cancel any existing guided tracking
-        StopGuidedTracking();
-
-        _guideCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        var guideCt = _guideCts.Token;
-
-        Logger.Notice($"GuidedTracking: target RA={targetRA:F4}h, Dec={targetDec:F4}°, guide interval={guideIntervalSeconds}s");
-
-        // Phase 1: Auto-center first
-        var centerResult = await AutoCenterAsync(targetRA, targetDec, maxIterations: 5, tolerancePx: 15.0, ct: guideCt);
-        if (centerResult == null || !centerResult.Success)
-        {
-            Logger.Warn("GuidedTracking: initial centering failed");
-            return centerResult;
-        }
-
-        Logger.Notice($"GuidedTracking: centered ({centerResult.FinalErrorPx:F1}px). Starting guide loop every {guideIntervalSeconds}s...");
-
-        // Phase 2: Guide loop
-        double plateScale = PlateScale;
-        int corrections = 0;
-        int checks = 0;
-
-        // Save camera settings
-        string? origIso = null;
-        string? origShutter = null;
-        try { origIso = SolveCamera!.Iso.value.ToString(); } catch { }
-        try { origShutter = SolveCamera!.shutterSpeed.value; } catch { }
-
-        try
-        {
-            while (!guideCt.IsCancellationRequested)
-            {
-                // Wait for the guide interval
-                await Task.Delay(guideIntervalSeconds * 1000, guideCt);
-                checks++;
-
-                guideCt.ThrowIfCancellationRequested();
-
-                // Set camera for short solve exposure
-                try
-                {
-                    SolveCamera!.Iso.value = 3200;
-                    SolveCamera.shutterSpeed.value = "2";
-                }
-                catch { }
-
-                // Capture
-                string baseName = $"guide_{DateTime.Now:yyyyMMdd_HHmmss}";
-                string imagePath;
-                try
-                {
-                    imagePath = await Task.Run(() => SolveCamera!.CaptureImage(baseName), guideCt);
-                }
-                catch (Exception ex)
-                {
-                    Logger.Warn($"GuidedTracking: guide capture failed: {ex.Message}");
-                    continue;
-                }
-
-                // Read mount position
-                var mountPos = await Tracker.GetAxisPositions();
-
-                // Solve
-                var solve = await PlateSolver.SolveAsync(imagePath, targetRA, targetDec, 10.0, guideCt);
-                if (solve == null)
-                {
-                    Logger.Warn("GuidedTracking: guide solve failed, skipping");
-                    TryDeleteFile(imagePath);
-                    continue;
-                }
-
-                // Compute error
-                double dRaDeg = (targetRA - solve.RaCenterHours) * 15.0 * Math.Cos(targetDec * Math.PI / 180.0);
-                double dDecDeg = targetDec - solve.DecCenterDeg;
-                double errorDeg = Math.Sqrt(dRaDeg * dRaDeg + dDecDeg * dDecDeg);
-                double errorPx = errorDeg * 3600.0 / plateScale;
-
-                Logger.Notice($"GuidedTracking: check #{checks} — drift={errorPx:F1}px ({errorDeg * 60:F1}')");
-
-                // Apply correction if drift > 3px
-                if (errorPx > 3.0)
-                {
-                    // Add calibration point
-                    AddAlignmentPoint(
-                        (float)solve.RaCenterHours, (float)solve.DecCenterDeg,
-                        mountPos.XArcsecs, mountPos.YArcsecs, mountPos.ZArcsecs);
-
-                    // Stop tracking, correct, restart
-                    await UartClient.Client.StopAll();
-                    await Task.Delay(500, guideCt);
-
-                    var targetAltAz = ComputeAltAz(targetRA, targetDec, DateTime.UtcNow, Latitude, Longitude);
-                    var actualAltAz = ComputeAltAz(solve.RaCenterHours, solve.DecCenterDeg, DateTime.UtcNow, Latitude, Longitude);
-
-                    double corrAlt = targetAltAz.alt - actualAltAz.alt;
-                    double corrAz = targetAltAz.az - actualAltAz.az;
-                    if (corrAz > 180.0) corrAz -= 360.0;
-                    if (corrAz < -180.0) corrAz += 360.0;
-
-                    int corrXArcsec = (int)(corrAlt * 3600.0);
-                    int corrZArcsec = (int)(corrAz * 3600.0);
-
-                    Logger.Notice($"GuidedTracking: correction X={corrXArcsec}\", Z={corrZArcsec}\"");
-                    await UartClient.Client.MoveRelative(Axis.X, corrXArcsec);
-                    await UartClient.Client.MoveRelative(Axis.Z, corrZArcsec);
-
-                    int maxCorr = Math.Max(Math.Abs(corrXArcsec), Math.Abs(corrZArcsec));
-                    await WaitForMoveCompleteAsync(maxCorr, guideCt);
-                    await StartTrackingAsync(targetRA, targetDec);
-
-                    corrections++;
-                    Logger.Notice($"GuidedTracking: correction #{corrections} applied ({errorPx:F1}px → recentered)");
-                }
-                else
-                {
-                    Logger.Notice($"GuidedTracking: on target ({errorPx:F1}px ≤ 3px threshold)");
-                }
-
-                TryDeleteFile(imagePath);
-            }
-        }
-        catch (OperationCanceledException)
-        {
-            Logger.Notice($"GuidedTracking: stopped after {checks} checks, {corrections} corrections");
-        }
-        finally
-        {
-            RestoreCameraSettings(origIso, origShutter);
-        }
-
-        return new AutoCenterResult
-        {
-            Success = true,
-            Iterations = corrections,
-            FinalErrorPx = 0,
-            Message = $"Guided tracking ended: {corrections} corrections over {checks} checks"
-        };
-    }
-
-    /// <summary>
-    /// Stop any active guided tracking loop.
-    /// </summary>
-    public static void StopGuidedTracking()
-    {
-        if (_guideCts != null)
-        {
-            Logger.Notice("Stopping guided tracking...");
-            _guideCts.Cancel();
-            _guideCts.Dispose();
-            _guideCts = null;
-        }
-    }
-
-    /// <summary>
-    /// Plate-solve the current pointing (diagnostic tool).
-    /// Captures an image and returns the solved position without moving the mount.
-    /// </summary>
-    public static async Task<PlateSolver.SolveResult?> SolveCurrentAsync(CancellationToken ct = default)
-    {
-        if (SolveCamera == null || !SolveCamera.connected)
-        {
-            Logger.Warn("SolveCurrent: no camera connected.");
-            return null;
-        }
-
-        // Use current tracking target as hint, or no hint
-        double? hintRA = CurrentTargetRa.HasValue ? (double)CurrentTargetRa.Value : null;
-        double? hintDec = CurrentTargetDec.HasValue ? (double)CurrentTargetDec.Value : null;
-
-        Logger.Notice("SolveCurrent: capturing for plate solve...");
-
-        // Configure camera
-        try
-        {
-            SolveCamera.Iso.value = 3200;
-            SolveCamera.shutterSpeed.value = "2";
-        }
-        catch { }
-
-        string baseName = $"solve_{DateTime.Now:yyyyMMdd_HHmmss}";
-        string imagePath = await Task.Run(() => SolveCamera.CaptureImage(baseName), ct);
-
-        var result = await PlateSolver.SolveAsync(imagePath, hintRA, hintDec, 30.0, ct);
-        TryDeleteFile(imagePath);
-
-        if (result != null)
-        {
-            Logger.Notice($"SolveCurrent: pointing at RA={result.RaCenterHours:F4}h, Dec={result.DecCenterDeg:F4}° " +
-                          $"(scale={result.PixelScaleArcsecPerPx:F2}\"/px)");
-        }
-
-        return result;
-    }
-
-    // ── Helper methods for plate-solve operations ──
-
-    /// <summary>
-    /// Convert alt-az coordinates back to RA/Dec for a given time and location.
-    /// Inverse of ComputeAltAz.
-    /// </summary>
-    public static (double raHours, double decDeg) AltAzToRaDec(
-        double altDeg, double azDeg, DateTime utcTime, double latDeg, double lonDeg)
-    {
-        double altRad = altDeg * Math.PI / 180.0;
-        double azRad = azDeg * Math.PI / 180.0;
-        double latRad = latDeg * Math.PI / 180.0;
-
-        // Dec from alt-az
-        double sinDec = Math.Sin(altRad) * Math.Sin(latRad) + Math.Cos(altRad) * Math.Cos(latRad) * Math.Cos(azRad);
-        sinDec = Math.Max(-1.0, Math.Min(1.0, sinDec));
-        double decRad = Math.Asin(sinDec);
-
-        // Hour angle from alt-az
-        double cosHA = (Math.Sin(altRad) - Math.Sin(decRad) * Math.Sin(latRad)) / (Math.Cos(decRad) * Math.Cos(latRad));
-        cosHA = Math.Max(-1.0, Math.Min(1.0, cosHA));
-        double haRad = Math.Acos(cosHA);
-        // Azimuth convention: 0=N, increases eastward. HA is positive west.
-        if (Math.Sin(azRad) > 0)
-            haRad = 2 * Math.PI - haRad;
-
-        double haDeg = haRad * 180.0 / Math.PI;
-        double lst = ComputeLocalSiderealTime(utcTime, lonDeg);
-
-        double raHours = lst - haDeg / 15.0;
-        raHours = ((raHours % 24.0) + 24.0) % 24.0;
-
-        return (raHours, decRad * 180.0 / Math.PI);
-    }
-
-    /// <summary>
-    /// Wait for mount movement to complete by monitoring status updates.
-    /// Calculates expected move time from the distance (in arcseconds) and waits,
-    /// then adds a settling delay.
-    /// Mount speed ≈ 7000 arcsec/sec (1000 steps/sec, ~0.14 steps/arcsec).
-    /// </summary>
-    /// <param name="maxDeltaArcsec">Largest axis delta in arcseconds.</param>
-    /// <param name="ct">Cancellation token.</param>
-    private static async Task WaitForMoveCompleteAsync(int maxDeltaArcsec, CancellationToken ct)
-    {
-        const double ArcsecPerSec = 7000.0; // approximate stepper speed
-        double expectedSec = Math.Abs(maxDeltaArcsec) / ArcsecPerSec;
-        int waitMs = (int)((expectedSec + 3.0) * 1000); // +3s settling margin
-        waitMs = Math.Max(waitMs, 3000); // at least 3 seconds
-        waitMs = Math.Min(waitMs, 120_000); // cap at 2 minutes safety
-        Logger.Debug($"WaitForMove: {maxDeltaArcsec}\" → ~{expectedSec:F1}s move, waiting {waitMs}ms total");
-        await Task.Delay(waitMs, ct);
-    }
-
-    private static void RestoreCameraSettings(string? origIso, string? origShutter)
-    {
-        if (SolveCamera == null || !SolveCamera.connected) return;
-        try
-        {
-            if (origIso != null && int.TryParse(origIso, out int iso))
-                SolveCamera.Iso.value = iso;
-            if (origShutter != null)
-                SolveCamera.shutterSpeed.value = origShutter;
-        }
-        catch (Exception ex)
-        {
-            Logger.Warn($"Could not restore camera settings: {ex.Message}");
-        }
-    }
-
-    private static void TryDeleteFile(string path)
-    {
-        try { if (File.Exists(path)) File.Delete(path); } catch { }
-    }
-
-    /// <summary>Result of an auto-centering operation.</summary>
-    public class AutoCenterResult
-    {
-        public bool Success { get; set; }
-        public int Iterations { get; set; }
-        public double FinalErrorPx { get; set; }
-        public double FinalErrorArcmin { get; set; }
-        public double SolvedRA { get; set; }
-        public double SolvedDec { get; set; }
-        public string Message { get; set; } = "";
-    }
-
-    /// <summary>Result of an auto-calibration operation.</summary>
-    public class AutoCalibrateResult
-    {
-        public int SolvedCount { get; set; }
-        public int FailedCount { get; set; }
-        public int TotalPositions { get; set; }
-        public int TotalPoints { get; set; }
-        public string Quality { get; set; } = "";
-        public int ElapsedSeconds { get; set; }
-    }
-
-    /// <summary>
-    /// Interactive alignment test from console.
-    /// Improved workflow with star catalog and auto-goto.
-    /// </summary>
-    public static async Task InteractiveAlignmentTest()
-    {
-        Console.WriteLine("\n=== Star Alignment ===");
-        Console.WriteLine($"Observer: Lat={Latitude:F2}°, Lon={Longitude:F2}°");
-        PrintAlignHelp();
-
-        while (true)
-        {
-            Console.Write("Align> ");
-            string? input = Console.ReadLine()?.Trim();
-
-            if (string.IsNullOrEmpty(input)) continue;
-            string lower = input.ToLower();
-
-            switch (lower)
-            {
-                case "1":
-                case "add":
-                    await HandleAddStar();
-                    break;
-
-                case "2":
-                case "status":
-                    PrintStatus();
-                    break;
-
-                case "3":
-                case "track":
-                    await HandleTrack();
-                    break;
-
-                case "g":
-                case "goto":
-                    await HandleGoto();
-                    break;
-
-                case "s":
-                case "stars":
-                    PrintVisibleStars();
-                    break;
-
-                case "r":
-                case "reset":
-                    Reset();
-                    break;
-
-                case "h":
-                case "help":
-                    PrintAlignHelp();
-                    break;
-
-                case "q":
-                case "quit":
-                    return;
-
-                default:
-                    Console.WriteLine("Unknown command. Type 'h' for help.");
-                    break;
-            }
-        }
-    }
-
-    private static void PrintAlignHelp()
-    {
-        Console.WriteLine("Commands:");
-        Console.WriteLine("  1/add   - Add alignment star (record current mount position)");
-        Console.WriteLine("  2/status- Show alignment status");
-        Console.WriteLine("  3/track - Start tracking a target");
-        Console.WriteLine("  g/goto  - Auto-goto approximate position of next star (after star 1)");
-        Console.WriteLine("  s/stars - Show visible alignment stars from catalog");
-        Console.WriteLine("  r/reset - Reset alignment");
-        Console.WriteLine("  h/help  - Show this help");
-        Console.WriteLine("  q/quit  - Exit alignment mode");
-        Console.WriteLine();
-    }
-
-    /// <summary>
-    /// Prompt user for star RA/Dec (with catalog lookup) and add alignment point.
-    /// After star 1, offers auto-goto to star 2.
-    /// </summary>
-    private static async Task HandleAddStar()
-    {
-        var (ra, dec, starName) = PromptForStar("Enter star name/index (or RA in hours for manual): ");
-        if (ra < 0) return; // user cancelled
-
-        Console.WriteLine($"Centering on {starName} (RA={ra:F3}h, Dec={dec:F3}°)...");
-        Console.WriteLine("Make sure the star is centered in your view, then press Enter.");
-        Console.ReadLine();
-
-        await AddAlignmentPointAsync(ra, dec);
-
-        if (_points.Count == 1 && _alignmentMatrix == null)
-        {
-            Console.WriteLine();
-            Console.WriteLine("Star 1 recorded! Now you need to center star 2.");
-            Console.WriteLine("TIP: Use 'g' (goto) to auto-slew to the approximate position of star 2.");
-            Console.WriteLine("     Use 's' (stars) to see visible stars, then 'g' to goto one.");
-            Console.WriteLine("     Then fine-tune centering and use '1' to record star 2.");
-        }
-    }
-
-    /// <summary>
-    /// Prompt user for a star (from catalog or manual RA/Dec entry).
-    /// Returns (ra, dec, displayName). Returns (-1, -1, "") if cancelled.
-    /// </summary>
-    private static (float ra, float dec, string name) PromptForStar(string prompt)
-    {
-        Console.Write(prompt);
-        string? input = Console.ReadLine()?.Trim();
-        if (string.IsNullOrEmpty(input)) return (-1, -1, "");
-
-        // Try catalog lookup first
-        var star = LookupStar(input);
-        if (star != null)
-        {
-            Console.WriteLine($"  → {star.Name}: RA={star.RA:F3}h, Dec={star.Dec:F3}°");
-            return (star.RA, star.Dec, star.Name);
-        }
-
-        // Try parsing as RA (manual entry)
-        if (float.TryParse(input, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out float ra))
-        {
-            Console.Write("Enter Dec (degrees): ");
-            string? decInput = Console.ReadLine()?.Trim();
-            if (float.TryParse(decInput, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out float dec))
-            {
-                return (ra, dec, $"RA={ra:F3}h Dec={dec:F2}°");
-            }
-            Console.WriteLine("Invalid Dec value.");
-            return (-1, -1, "");
-        }
-
-        Console.WriteLine($"Star '{input}' not found in catalog. Enter RA in hours for manual entry.");
-        return (-1, -1, "");
-    }
-
-    /// <summary>
-    /// Handle the goto command — auto-slew to approximate position of a star.
-    /// </summary>
-    private static async Task HandleGoto()
-    {
-        if (_points.Count < 1)
-        {
-            Console.WriteLine("Add at least 1 alignment star first (command '1').");
-            return;
-        }
-
-        var (ra, dec, name) = PromptForStar("Goto star name/index (or RA): ");
-        if (ra < 0) return;
-
-        Console.WriteLine($"Auto-slewing to approximate position of {name}...");
-        await GotoApproximateAsync(ra, dec);
-        Console.WriteLine("Done. Fine-tune position with xr/zr, then use '1' to record alignment point.");
-    }
-
-    /// <summary>
-    /// Handle tracking command.
-    /// </summary>
-    private static async Task HandleTrack()
-    {
-        if (!IsAligned)
-        {
-            Console.WriteLine("Not aligned yet! Add at least 2 stars first.");
-            return;
-        }
-
-        var (ra, dec, name) = PromptForStar("Track target name/index (or RA): ");
-        if (ra < 0) return;
-
-        Console.WriteLine($"Starting tracking on {name}...");
-        await StartTrackingAsync(ra, dec);
-    }
-
-    private static void PrintStatus()
-    {
-        Console.WriteLine($"Alignment points: {PointCount}");
-        for (int i = 0; i < _points.Count; i++)
-        {
-            var p = _points[i];
-            var (alt, az) = ComputeAltAz(p.RA, p.Dec, DateTime.UtcNow, Latitude, Longitude);
-            Console.WriteLine($"  Star {i + 1}: RA={p.RA:F3}h, Dec={p.Dec:F2}° (current alt={alt:F1}°, az={az:F1}°) Mount({p.MountX}, {p.MountY}, {p.MountZ})");
-        }
-        Console.WriteLine($"Aligned: {IsAligned}");
-        if (IsAligned)
-        {
-            var m = _alignmentMatrix!;
-            Console.WriteLine("Matrix:");
-            Console.WriteLine($"  [{m[0]:F4}, {m[1]:F4}, {m[2]:F4}]");
-            Console.WriteLine($"  [{m[3]:F4}, {m[4]:F4}, {m[5]:F4}]");
-            Console.WriteLine($"  [{m[6]:F4}, {m[7]:F4}, {m[8]:F4}]");
-        }
-    }
-
+    // Plate-solve assisted operations were moved to Calibration.AutoSolve.cs
     #endregion
 }

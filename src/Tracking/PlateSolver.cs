@@ -51,16 +51,26 @@ public static class PlateSolver
     /// <summary>Downsample factor for source extraction (2 = half-res, faster).</summary>
     public static int Downsample { get; set; } = 2;
 
-    /// <summary>
-    /// Fraction of each image dimension to keep from the center before solving.
-    /// 0.5 = keep center 50%×50% (25% of pixels) — removes distorted/vignetted borders.
-    /// Set to 1.0 to disable cropping.
-    /// Example: 24 MP full-frame → center-crop at 0.5 → 6 MP centre-only image.
-    /// </summary>
-    public static double CropFraction { get; set; } = 0.5;
-
     /// <summary>Temporary directory for solve-field output files.</summary>
-    private static readonly string TempDir = Path.Combine(Path.GetTempPath(), "platesolve");
+    internal static readonly string TempDir = Path.Combine(Directory.GetCurrentDirectory(), "platesolve_tmp");
+
+    static PlateSolver()
+    {
+        try
+        {
+            Directory.CreateDirectory(TempDir);
+            // Force astrometry.net and its Python scripts (via tempfile module) to use our TempDir 
+            // instead of the RAMdisk `/tmp`, which easily runs out of space.
+            Environment.SetEnvironmentVariable("TMPDIR", TempDir);
+
+            // Clean up old files left over from previous crashes
+            foreach (var file in Directory.GetFiles(TempDir))
+            {
+                try { File.Delete(file); } catch { }
+            }
+        }
+        catch { }
+    }
 
     // ── Public API ──
 
@@ -88,11 +98,16 @@ public static class PlateSolver
         }
 
         Directory.CreateDirectory(TempDir);
+        
+        // Pre-solve cleanup: ensure adequate disk space by removing ALL old temp files.
+        // Each solve-field run can generate 50-200 MB of auxiliary files.
+        CleanupTempFiles(TempDir);
+        
+        Logger.Debug($"PlateSolver: temp directory is {TempDir}");
 
         string solveInput = imagePath;
         string? convertedFile = null;
         string? croppedFile = null;
-        bool dcrawHalved = false;
 
         try
         {
@@ -102,44 +117,40 @@ public static class PlateSolver
             {
                 Logger.Notice($"converting RAW ({ext}) to JPEG via dcraw...");
                 convertedFile = Path.Combine(TempDir, Path.GetFileNameWithoutExtension(imagePath) + ".jpg");
-                bool converted = await ConvertRawToJpegAsync(imagePath, convertedFile, ct);
+                bool converted = await ImageProcessing.ConvertRawToJpegAsync(imagePath, convertedFile, ct);
                 if (!converted)
                 {
                     Logger.Warn("RAW conversion failed");
                     return null;
                 }
                 solveInput = convertedFile;
-                dcrawHalved = true; // dcraw -h halves resolution → doubles plate scale
             }
 
             // Center-crop to strip distorted/vignetted borders before solving.
             // Pixel scale (arcsec/px) is unchanged by cropping — only FOV shrinks.
-            if (CropFraction < 1.0)
-            {
-                croppedFile = await CropCenterAsync(solveInput, ct);
-                if (croppedFile != null)
-                    solveInput = croppedFile;
-            }
+            croppedFile = await ImageProcessing.CropCenterAsync(solveInput, ct);
+            if (croppedFile != null)
+                solveInput = croppedFile;
 
             // Build solve-field command
             // dcraw -h halves the image resolution, so effective plate scale doubles.
             // solve-field scale hints must match the INPUT image, not the original sensor.
             double scale = PlateScale;
-            if (dcrawHalved) scale *= 2.0;
             double scaleLow = scale * 0.7;
             double scaleHigh = scale * 1.3;
 
             // When dcraw already halved the image, don't downsample again in solve-field
-            int effectiveDownsample = dcrawHalved ? 1 : Downsample;
+            //int effectiveDownsample = dcrawHalved ? 1 : Downsample;
 
             // Use a unique prefix per solve to avoid file collisions
             string prefix = $"solve_{DateTime.UtcNow:yyyyMMdd_HHmmss}_{Guid.NewGuid():N}";
             string wcsFile = Path.Combine(TempDir, prefix + ".wcs");
 
             var args = $"--scale-units arcsecperpix --scale-low {scaleLow:F1} --scale-high {scaleHigh:F1} " +
-                       $"--downsample {effectiveDownsample} --no-plots --overwrite " +
-                       $"--cpulimit {CpuLimitSeconds} " +
+                       $"--overwrite " +
+                       $"--cpulimit {CpuLimitSeconds} --no-plots " +
                        $"--dir \"{TempDir}\" --out \"{prefix}\" ";
+            Logger.Info("PlateSolver: configured solve-field with args: " + args);
 
             // RA/Dec hints dramatically speed up solving (typically 5-15s vs 30-60s)
             if (hintRA.HasValue && hintDec.HasValue)
@@ -150,11 +161,11 @@ public static class PlateSolver
 
             args += $"\"{solveInput}\"";
 
-            Logger.Notice($"PlateSolver: running solve-field (scale hint {scaleLow:F1}-{scaleHigh:F1}\"/px, ds={effectiveDownsample})...");
+            Logger.Notice($"PlateSolver: running solve-field (scale hint {scaleLow:F1}-{scaleHigh:F1}\"/px)");
             Logger.Debug($"PlateSolver: solve-field {args}");
 
             var sw = Stopwatch.StartNew();
-            var (exitCode, stdout, stderr) = await RunProcessAsync("solve-field", args, CpuLimitSeconds + 60, ct);
+            var (exitCode, stdout, stderr) = await ExternalProcess.RunProcessAsync("solve-field", args, CpuLimitSeconds + 60, ct);
             sw.Stop();
 
             if (ct.IsCancellationRequested)
@@ -211,96 +222,21 @@ public static class PlateSolver
         {
             // Cleanup temp files (keep input image, clean solve artifacts)
             CleanupTempFiles(TempDir);
-            if (convertedFile != null && File.Exists(convertedFile))
+            /*if (convertedFile != null && File.Exists(convertedFile))
                 try { File.Delete(convertedFile); } catch { }
             if (croppedFile != null && File.Exists(croppedFile))
-                try { File.Delete(croppedFile); } catch { }
+                try { File.Delete(croppedFile); } catch { }*/
         }
-    }
-
-    // ── Center crop ──
-
-    /// <summary>
-    /// Crop an image to the centre <see cref="CropFraction"/> of each dimension using
-    /// ImageMagick <c>convert</c>.  Pixel scale is unaffected — only the FOV shrinks,
-    /// removing lens-distorted / vignetted borders that confuse star detection.
-    /// </summary>
-    private static async Task<string?> CropCenterAsync(string imagePath, CancellationToken ct)
-    {
-        int pct = (int)Math.Round(CropFraction * 100.0);
-        string outPath = Path.Combine(TempDir, $"crop_{Path.GetFileName(imagePath)}");
-
-        // ImageMagick: gravity Centre, then crop pct%×pct% from that anchor.
-        // +repage resets the canvas so downstream tools see a clean image size.
-        string bashCmd = $"convert '{imagePath}' -gravity Center -crop {pct}%x{pct}%+0+0 +repage '{outPath}'";
-        var (exitCode, _, stderr) = await RunProcessAsync("bash", new[] { "-c", bashCmd }, 60, ct);
-        if (exitCode != 0 || !File.Exists(outPath) || new FileInfo(outPath).Length == 0)
-        {
-            Logger.Warn($"PlateSolver: center crop failed (crop {pct}%): {stderr}");
-            return null;
-        }
-        Logger.Notice($"PlateSolver: center-cropped to {pct}%×{pct}% → {Path.GetFileName(outPath)}");
-        return outPath;
-    }
-
-    // ── RAW conversion ──
-
-    /// <summary>
-    /// Convert a RAW camera file to JPEG using dcraw + pnmtojpeg (or cjpeg).
-    /// Uses half-resolution (-h) for speed — still plenty of stars for solving.
-    /// </summary>
-    private static async Task<bool> ConvertRawToJpegAsync(string rawPath, string jpegPath, CancellationToken ct)
-    {
-        // dcraw -c -w -h outputs PPM to stdout; pipe through cjpeg or pnmtojpeg
-        // Try pnmtojpeg first (netpbm), fall back to cjpeg (libjpeg-turbo)
-        string pipeCmd;
-        if (CommandExists("pnmtojpeg"))
-            pipeCmd = "pnmtojpeg";
-        else if (CommandExists("cjpeg"))
-            pipeCmd = "cjpeg";
-        else
-        {
-            // No JPEG encoder available — output PPM directly (solve-field handles it)
-            jpegPath = Path.ChangeExtension(jpegPath, ".ppm");
-            var (code, _, err) = await RunProcessAsync("dcraw", new[] { "-c", "-w", "-h", "-b", "0.1", rawPath }, 120, ct, jpegPath);
-            return code == 0;
-        }
-
-        // dcraw -c -w -h RAW | pnmtojpeg > output.jpg
-        // Use bash -c with ArgumentList so that the script string is passed as a single
-        // unambiguous argument — avoids .NET's Windows-style Arguments parser mangling spaces/quotes.
-        string bashCmd = $"dcraw -c -w -h -b 0.1 '{rawPath}' | {pipeCmd} > '{jpegPath}'";
-        var (exitCode, _, stderr) = await RunProcessAsync("bash", new[] { "-c", bashCmd }, 120, ct);
-        if (exitCode != 0)
-        {
-            Logger.Warn($"PlateSolver: dcraw conversion failed: {stderr}");
-            return false;
-        }
-        return File.Exists(jpegPath) && new FileInfo(jpegPath).Length > 0;
-    }
-
-    private static bool CommandExists(string cmd)
-    {
-        try
-        {
-            var psi = new ProcessStartInfo("which", cmd)
-            {
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                UseShellExecute = false
-            };
-            using var p = Process.Start(psi);
-            p?.WaitForExit(5000);
-            return p?.ExitCode == 0;
-        }
-        catch { return false; }
     }
 
     // ── WCS parsing ──
 
     /// <summary>
     /// Parse a FITS WCS header file (.wcs) emitted by solve-field.
-    /// Extracts CRVAL1 (RA), CRVAL2 (Dec), CD matrix (pixel scale + rotation).
+    /// Extracts CRVAL1 (RA), CRVAL2 (Dec), CRPIX, CD matrix, and image dimensions.
+    /// Computes the actual sky coordinate at the image center pixel using the
+    /// full TAN (gnomonic) projection — CRVAL is at the reference pixel (CRPIX),
+    /// which may NOT coincide with the image center after WCS refinement/tweaking.
     /// </summary>
     private static SolveResult? ParseWcsFile(string wcsPath)
     {
@@ -311,19 +247,21 @@ public static class PlateSolver
             // FITS headers are 80-char fixed-width records
             string text = File.ReadAllText(wcsPath);
 
-            double? crval1 = ExtractFitsValue(text, "CRVAL1");  // RA center (degrees)
-            double? crval2 = ExtractFitsValue(text, "CRVAL2");  // Dec center (degrees)
-            double? cd11 = ExtractFitsValue(text, "CD1_1");
-            double? cd12 = ExtractFitsValue(text, "CD1_2");
-            double? cd21 = ExtractFitsValue(text, "CD2_1");
-            double? cd22 = ExtractFitsValue(text, "CD2_2");
+            double? crval1 = ExtractFitsValue(text, "CRVAL1");  // RA at reference pixel (degrees)
+            double? crval2 = ExtractFitsValue(text, "CRVAL2");  // Dec at reference pixel (degrees)
+            double? crpix1 = ExtractFitsValue(text, "CRPIX1");  // Reference pixel X (1-based)
+            double? crpix2 = ExtractFitsValue(text, "CRPIX2");  // Reference pixel Y (1-based)
+            double? cd11   = ExtractFitsValue(text, "CD1_1");
+            double? cd12   = ExtractFitsValue(text, "CD1_2");
+            double? cd21   = ExtractFitsValue(text, "CD2_1");
+            double? cd22   = ExtractFitsValue(text, "CD2_2");
             double? naxis1 = ExtractFitsValue(text, "IMAGEW") ?? ExtractFitsValue(text, "NAXIS1");
             double? naxis2 = ExtractFitsValue(text, "IMAGEH") ?? ExtractFitsValue(text, "NAXIS2");
 
             if (crval1 == null || crval2 == null)
                 return null;
 
-            double raDeg = crval1.Value;
+            double raDeg  = crval1.Value;
             double decDeg = crval2.Value;
 
             // Pixel scale from CD matrix
@@ -338,19 +276,89 @@ public static class PlateSolver
                 rotation = Math.Atan2(cd21.Value, cd11.Value) * 180.0 / Math.PI;
             }
 
-            double fieldW = 0, fieldH = 0;
-            if (naxis1 != null && naxis2 != null && pixScale > 0)
+            // ── Compute true image-center sky coordinate via TAN projection ──
+            // CRVAL is the sky coord at CRPIX, which may NOT be the image center.
+            // We project the actual center pixel through the WCS to get the true field center.
+            bool hasCrpix = crpix1 != null && crpix2 != null;
+            bool hasSize  = naxis1 != null && naxis2 != null;
+            bool hasCd    = cd11 != null && cd12 != null && cd21 != null && cd22 != null;
+
+            if (hasCrpix && hasSize && hasCd)
             {
-                fieldW = naxis1.Value * pixScale / 3600.0;
-                fieldH = naxis2.Value * pixScale / 3600.0;
+                double cx = naxis1!.Value / 2.0;   // image center pixel (0.5-based)
+                double cy = naxis2!.Value / 2.0;
+                double dx = cx - crpix1!.Value;     // offset from reference pixel
+                double dy = cy - crpix2!.Value;
+
+                Logger.Debug($"PlateSolver WCS: CRPIX=({crpix1.Value:F1},{crpix2.Value:F1}), " +
+                             $"ImageCenter=({cx:F1},{cy:F1}), offset=({dx:F1},{dy:F1})px");
+
+                if (Math.Abs(dx) > 0.5 || Math.Abs(dy) > 0.5)
+                {
+                    // Intermediate world coordinates (degrees) via CD matrix
+                    double xIwc = cd11!.Value * dx + cd12!.Value * dy;
+                    double yIwc = cd21!.Value * dx + cd22!.Value * dy;
+
+                    // TAN inverse projection → native spherical coordinates
+                    double r = Math.Sqrt(xIwc * xIwc + yIwc * yIwc);   // degrees
+                    double phi, theta;
+                    const double Rad2Deg = 180.0 / Math.PI;
+                    if (r < 1e-12)
+                    {
+                        phi   = 0;
+                        theta = Math.PI / 2.0;
+                    }
+                    else
+                    {
+                        phi   = Math.Atan2(xIwc, -yIwc);          // radians
+                        theta = Math.Atan2(Rad2Deg, r);            // radians (= atan(57.296/r°))
+                    }
+
+                    // Native → celestial  (φ_p = π for zenithal projections)
+                    double ra0  = crval1.Value / Rad2Deg;           // radians
+                    double dec0 = crval2.Value / Rad2Deg;           // radians
+                    double sinT = Math.Sin(theta), cosT = Math.Cos(theta);
+                    double sinD = Math.Sin(dec0),  cosD = Math.Cos(dec0);
+                    double sinP = Math.Sin(phi),   cosP = Math.Cos(phi);
+
+                    double sinDec = sinT * sinD - cosT * cosD * cosP;
+                    decDeg = Math.Asin(Math.Clamp(sinDec, -1.0, 1.0)) * Rad2Deg;
+
+                    double aNum = cosT * sinP;
+                    double aDen = sinT * cosD + cosT * sinD * cosP;
+                    raDeg = (ra0 + Math.Atan2(aNum, aDen)) * Rad2Deg;
+
+                    // Normalize RA to [0, 360)
+                    raDeg = ((raDeg % 360.0) + 360.0) % 360.0;
+
+                    Logger.Notice($"PlateSolver WCS: CRPIX offset ({dx:F1},{dy:F1})px → " +
+                                  $"center shifted from CRVAL({crval1.Value:F4}°,{crval2.Value:F4}°) " +
+                                  $"to imgCenter({raDeg:F4}°,{decDeg:F4}°)");
+                }
+                else
+                {
+                    Logger.Debug("PlateSolver WCS: CRPIX is at image center — using CRVAL directly");
+                }
+            }
+            else
+            {
+                Logger.Debug($"PlateSolver WCS: missing CRPIX/NAXIS/CD — using CRVAL as center " +
+                             $"(hasCrpix={hasCrpix}, hasSize={hasSize}, hasCd={hasCd})");
+            }
+
+            double fieldW = 0, fieldH = 0;
+            if (hasSize && pixScale > 0)
+            {
+                fieldW = naxis1!.Value * pixScale / 3600.0;
+                fieldH = naxis2!.Value * pixScale / 3600.0;
             }
 
             return new SolveResult
             {
                 RaCenterHours = raDeg / 15.0,
-                DecCenterDeg = decDeg,
+                DecCenterDeg  = decDeg,
                 PixelScaleArcsecPerPx = pixScale,
-                RotationDeg = rotation,
+                RotationDeg   = rotation,
                 FieldWidthDeg = fieldW,
                 FieldHeightDeg = fieldH
             };
@@ -425,117 +433,6 @@ public static class PlateSolver
         return result;
     }
 
-    // ── Process execution ──
-
-    /// <summary>
-    /// Run an external process and capture stdout/stderr.
-    /// Accepts a pre-split argument list — avoids shell quoting issues on Linux.
-    /// </summary>
-    private static Task<(int exitCode, string stdout, string stderr)> RunProcessAsync(
-        string command, string[] argumentList, int timeoutSeconds, CancellationToken ct, string? stdoutFile = null)
-    {
-        var psi = new ProcessStartInfo
-        {
-            FileName = command,
-            UseShellExecute = false,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            CreateNoWindow = true
-        };
-        foreach (var arg in argumentList)
-            psi.ArgumentList.Add(arg);
-        return RunProcessCoreAsync(psi, timeoutSeconds, ct, stdoutFile);
-    }
-
-    /// <summary>
-    /// Run an external process and capture stdout/stderr.
-    /// </summary>
-    private static Task<(int exitCode, string stdout, string stderr)> RunProcessAsync(
-        string command, string arguments, int timeoutSeconds, CancellationToken ct, string? stdoutFile = null)
-    {
-        var psi = new ProcessStartInfo
-        {
-            FileName = command,
-            Arguments = arguments,
-            UseShellExecute = false,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            CreateNoWindow = true
-        };
-        return RunProcessCoreAsync(psi, timeoutSeconds, ct, stdoutFile);
-    }
-
-    private static async Task<(int exitCode, string stdout, string stderr)> RunProcessCoreAsync(
-        ProcessStartInfo psi, int timeoutSeconds, CancellationToken ct, string? stdoutFile = null)
-    {
-
-        using var process = new Process { StartInfo = psi };
-
-        try
-        {
-            process.Start();
-        }
-        catch (Exception ex)
-        {
-            return (-1, "", $"Failed to start {psi.FileName}: {ex.Message}");
-        }
-
-        // If redirecting stdout to a file (for RAW conversion)
-        if (stdoutFile != null)
-        {
-            using var fs = File.Create(stdoutFile);
-            var copyTask = process.StandardOutput.BaseStream.CopyToAsync(fs, ct);
-            var stderrTask = process.StandardError.ReadToEndAsync(ct);
-
-            using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            cts.CancelAfter(TimeSpan.FromSeconds(timeoutSeconds));
-
-            try
-            {
-                await process.WaitForExitAsync(cts.Token);
-                await copyTask;
-                string stderr = await stderrTask;
-                return (process.ExitCode, "(redirected to file)", stderr);
-            }
-            catch (OperationCanceledException)
-            {
-                TryKillProcess(process);
-                return (-1, "", "Process timed out or was cancelled");
-            }
-        }
-        else
-        {
-            var stdoutTask = process.StandardOutput.ReadToEndAsync(ct);
-            var stderrTask = process.StandardError.ReadToEndAsync(ct);
-
-            using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            cts.CancelAfter(TimeSpan.FromSeconds(timeoutSeconds));
-
-            try
-            {
-                await process.WaitForExitAsync(cts.Token);
-                string stdout = await stdoutTask;
-                string stderr = await stderrTask;
-                return (process.ExitCode, stdout, stderr);
-            }
-            catch (OperationCanceledException)
-            {
-                TryKillProcess(process);
-                return (-1, "", "Process timed out or was cancelled");
-            }
-        }
-    }
-
-    private static void TryKillProcess(Process process)
-    {
-        try
-        {
-            if (!process.HasExited)
-                process.Kill(entireProcessTree: true);
-        }
-        catch { }
-    }
-
     // ── Temp file cleanup ──
 
     private static void CleanupTempFiles(string dir)
@@ -544,10 +441,22 @@ public static class PlateSolver
 
         try
         {
-            // Remove solve-field artifacts but keep the directory
-            foreach (string file in Directory.GetFiles(dir, "solve_*"))
+            // Remove ALL solve-field artifacts to prevent disk exhaustion.
+            // Each solve can generate 50-200 MB of auxiliary files.
+            foreach (string file in Directory.GetFiles(dir))
             {
-                try { File.Delete(file); } catch { }
+                try
+                {
+                    long kb = new FileInfo(file).Length / 1024;
+                    File.Delete(file);
+                    Logger.Debug($"Deleted temp file {Path.GetFileName(file)} ({kb} KB)");
+                }
+                catch { }
+            }
+            // Also clean subdirectories that solve-field may create
+            foreach (string subDir in Directory.GetDirectories(dir))
+            {
+                try { Directory.Delete(subDir, true); } catch { }
             }
         }
         catch { }
