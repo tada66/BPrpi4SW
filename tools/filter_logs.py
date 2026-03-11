@@ -9,14 +9,15 @@ from pathlib import Path
 LEVELS = {
     "TRACE": 0,
     "DEBUG": 1,
-    "INFO": 2,
-    "NOTICE": 3,
-    "WARN": 4,
-    "ERROR": 5,
-    "FATAL": 6,
+    "STATUS": 2,
+    "INFO": 3,
+    "NOTICE": 4,
+    "WARN": 5,
+    "ERROR": 6,
+    "FATAL": 7,
 }
 
-LOG_HEADER_RE = re.compile(r"^\[(TRACE|DEBUG|INFO|NOTICE|WARN|ERROR|FATAL)\]")
+LOG_HEADER_RE = re.compile(r"^\[(TRACE|DEBUG|STATUS|INFO|NOTICE|WARN|ERROR|FATAL)\]")
 
 
 def parse_min_level(value: str) -> int:
@@ -28,11 +29,11 @@ def parse_min_level(value: str) -> int:
         numeric = int(value)
     except ValueError as exc:
         raise argparse.ArgumentTypeError(
-            f"Invalid level '{value}'. Use one of: {', '.join(LEVELS)} or 0-6."
+            f"Invalid level '{value}'. Use one of: {', '.join(LEVELS)} or 0-7."
         ) from exc
 
-    if numeric < 0 or numeric > 6:
-        raise argparse.ArgumentTypeError("Numeric level must be in range 0-6.")
+    if numeric < 0 or numeric > 7:
+        raise argparse.ArgumentTypeError("Numeric level must be in range 0-7.")
     return numeric
 
 
@@ -73,7 +74,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description=(
             "Filter log lines by minimum severity level. "
-            "Levels: Trace=0, Debug=1, Info=2, Notice=3, Warn=4, Error=5, Fatal=6."
+            "Levels: Trace=0, Debug=1, Status=2, Info=3, Notice=4, Warn=5, Error=6, Fatal=7."
         )
     )
     parser.add_argument("input", type=Path, help="Path to input log file")

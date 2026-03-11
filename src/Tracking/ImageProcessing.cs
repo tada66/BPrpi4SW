@@ -36,7 +36,7 @@ public static class ImageProcessing
         var (exitCode, _, stderr) = await ExternalProcess.RunProcessAsync("bash", new[] { "-c", bashCmd }, 60, ct);
         if (exitCode != 0 || !File.Exists(outPath) || new FileInfo(outPath).Length == 0)
         {
-            Logger.Warn($"PlateSolver: center crop failed (crop {pct}%): {stderr}");
+            Logger.Error($"PlateSolver: center crop failed (crop {pct}%): {stderr}");
             return null;
         }
         Logger.Notice($"PlateSolver: center-cropped to {pct}%×{pct}% → {Path.GetFileName(outPath)}");
@@ -71,14 +71,50 @@ public static class ImageProcessing
         // unambiguous argument — avoids .NET's Windows-style Arguments parser mangling spaces/quotes.
         // Export TMPDIR to keep any temp files out of /tmp RAMdisk.
         string tmpDir = PlateSolver.TempDir;
+
+        // Guard against "No space left on device" — dcraw decompresses 24 MP RAW → ~70 MB PPM
+        // piped through pnmtojpeg.  pnmtojpeg uses /tmp for internal buffering; on the Pi
+        // /tmp is a separate tmpfs (typically 256-512 MB) that fills up with leftover
+        // astrometry.net files from killed solve attempts.  Check BOTH the TempDir filesystem
+        // (for the output .jpg) AND /tmp (for pnmtojpeg's scratch space).
+        if (!CheckDiskSpace(tmpDir) || !CheckDiskSpace("/tmp"))
+            return false;
+
         string bashCmd = $"export TMPDIR='{tmpDir}'; dcraw -c -w -b 0.1 '{rawPath}' | {pipeCmd} > '{jpegPath}'";
         var (exitCode, _, stderr) = await ExternalProcess.RunProcessAsync("bash", new[] { "-c", bashCmd }, 120, ct);
         if (exitCode != 0)
         {
-            Logger.Warn($"PlateSolver: dcraw conversion failed: {stderr}");
+            bool diskFull = stderr.Contains("No space left on device") || stderr.Contains("fwrite");
+            if (diskFull)
+                Logger.Warn($"PlateSolver: dcraw conversion failed — DISK FULL (check /tmp and app dir). " +
+                            $"Run: df -h && ls -lh ~/BPrpi4SW/bin/Debug/net10.0/bulb_*.arw 2>/dev/null | wc -l. Error: {stderr}");
+            else
+                Logger.Warn($"PlateSolver: dcraw conversion failed: {stderr}");
             return false;
         }
         return File.Exists(jpegPath) && new FileInfo(jpegPath).Length > 0;
+    }
+
+    /// <summary>
+    /// Checks that the filesystem containing <paramref name="path"/> has at least
+    /// <paramref name="minFreeMB"/> MB available.  Logs a warning and returns false if not.
+    /// </summary>
+    internal static bool CheckDiskSpace(string path, long minFreeMB = 200)
+    {
+        try
+        {
+            var drive = new DriveInfo(path);
+            long freeMB = drive.AvailableFreeSpace / (1024 * 1024);
+            if (freeMB < minFreeMB)
+            {
+                Logger.Warn($"PlateSolver: LOW DISK SPACE on '{drive.Name}' ({freeMB} MB free, need ≥{minFreeMB} MB). " +
+                            $"Delete old bulb_*.arw / solve_*.arw files, or check /tmp for stale astrometry leftovers. " +
+                            $"Run: df -h");
+                return false;
+            }
+        }
+        catch (Exception ex) { Logger.Debug($"CheckDiskSpace({path}): {ex.Message}"); }
+        return true;
     }
 
     private static bool CommandExists(string cmd)

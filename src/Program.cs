@@ -14,7 +14,7 @@ class Program
 
     static async Task Main()
     {
-        Logger.Notice("Program started.");
+        Logger.Notice("StarTracker v1.0.2 started."); 
         using var lcd = new LcdController();
 
         if (!OperatingSystem.IsLinux())
@@ -50,7 +50,6 @@ class Program
         StartServer(lcd, ip);
 
         // Keep the main thread alive
-        Logger.Notice("Server running. Press Ctrl+C to stop.");
         var tcs = new TaskCompletionSource();
         Console.CancelKeyPress += (_, e) => { e.Cancel = true; tcs.TrySetResult(); };
         await tcs.Task;
@@ -95,17 +94,17 @@ class Program
             var advertiser = new ServiceAdvertiser(WS_PORT, UDP_PORT, HTTP_PORT);
             advertiser.Start();
 
-            Logger.Notice($"Device control server started:");
-            Logger.Notice($"  WebSocket : ws://{ip}:{WS_PORT}");
-            Logger.Notice($"  UDP LV    : {ip}:{UDP_PORT}");
-            Logger.Notice($"  HTTP Files: http://{ip}:{HTTP_PORT}/captures/");
-            Logger.Notice($"  mDNS      : _bpcontrol._tcp.local");
+            Logger.Info($"Device control server started:");
+            Logger.Info($"  WebSocket : ws://{ip}:{WS_PORT}");
+            Logger.Info($"  UDP LV    : {ip}:{UDP_PORT}");
+            Logger.Info($"  HTTP Files: http://{ip}:{HTTP_PORT}/captures/");
+            Logger.Info($"  mDNS      : _bpcontrol._tcp.local");
             if (ip == HotspotManager.HotspotIp)
-                Logger.Notice($"  Hotspot   : SSID={HotspotManager.HotspotSsid} PW={HotspotManager.HotspotPassword}");
+                Logger.Info($"  Hotspot   : SSID={HotspotManager.HotspotSsid} PW={HotspotManager.HotspotPassword}");
         }
         catch (Exception ex)
         {
-            Logger.Error($"Failed to start server: {ex.Message}");
+            Logger.Fatal($"Failed to start server: {ex.Message}");
         }
     }
 }

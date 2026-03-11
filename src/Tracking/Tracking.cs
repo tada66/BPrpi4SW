@@ -85,4 +85,44 @@ internal static class Tracker
             await Task.Delay(300, ct); // Poll every 300ms
         }
     }
+
+    /// <summary>
+    /// After StartCelestialTracking, the Pico firmware performs an internal slew to the
+    /// predicted sky position before engaging the sidereal tracking rate.
+    /// During this slew the status reports "Celestial Tracking: INACTIVE".
+    /// This method waits until the first status update that shows TRACKING, then adds a
+    /// brief stabilisation delay so the mount has fully settled before an exposure begins.
+    /// </summary>
+    internal static async Task WaitForCelestialTrackingAsync(int timeoutMs = 15000, CancellationToken ct = default)
+    {
+        Logger.Debug("WaitForCelestialTracking: waiting for mount to complete initial slew...");
+        var tcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        Action<float, int, int, int, bool, bool, bool, int> handler =
+            (_, _, _, _, _, _, celestialTracking, _) =>
+            {
+                if (celestialTracking)
+                    tcs.TrySetResult(true);
+            };
+
+        UartClient.Client.StatusReceived += handler;
+        try
+        {
+            var timeoutTask = Task.Delay(timeoutMs, ct);
+            var winner = await Task.WhenAny(tcs.Task, timeoutTask);
+            if (winner == timeoutTask)
+                Logger.Warn("WaitForCelestialTracking: timed out waiting for TRACKING state — mount may still be slewing");
+            else
+                Logger.Debug("WaitForCelestialTracking: TRACKING confirmed.");
+        }
+        finally
+        {
+            UartClient.Client.StatusReceived -= handler;
+        }
+
+        // Wait one additional status period so the mount is fully settled at sidereal rate
+        // before we start a camera exposure.
+        await Task.Delay(2500, ct);
+        Logger.Debug("WaitForCelestialTracking: stabilisation complete.");
+    }
 }

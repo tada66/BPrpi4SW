@@ -148,8 +148,11 @@ public static partial class Calibration
                 }
 
                 Logger.Notice($"AutoCenter: correcting — ΔAlt={dDecDeg * 3600:F0}\", ΔAz={dRaDeg * 3600:F0}\"");
-                await UartClient.Client.StopAll();
-                await Task.Delay(500, ct);
+                // Note: MoveRelative already stops celestial tracking on the Pico internally
+                // (stepper_queue_static_move sets celestial_state.active = false).
+                // DO NOT call StopAll() here — it sends CMD_STOP which disables the motors
+                // entirely, losing the position reference and invalidating calibration.
+                await Task.Delay(200, ct);
 
                 var targetAltAz = ComputeAltAz(targetRA, targetDec, DateTime.UtcNow, Latitude, Longitude);
                 var actualAltAz = ComputeAltAz(solve.RaCenterHours, solve.DecCenterDeg, DateTime.UtcNow, Latitude, Longitude);
@@ -170,7 +173,13 @@ public static partial class Calibration
                 await WaitForMoveCompleteAsync(maxCorr, ct);
 
                 await StartTrackingAsync(targetRA, targetDec);
-                await Task.Delay(2000, ct);
+                // Wait until the Pico's initial slew (after CMD_TRACK_CELESTIAL) finishes
+                // and the mount reports TRACKING — then add 2.5s stabilisation.
+                // Task.Delay(2000) was not enough: during the test on 2026-03-11 the mount
+                // was still INACTIVE at 2 s and only reached TRACKING 1 s later, causing
+                // the iteration-2 exposure to begin mid-slew and produce a blurred image that
+                // astrometry.net instantly rejected (exit code 255).
+                await Tracker.WaitForCelestialTrackingAsync(15000, ct);
 
                 TryDeleteFile(imagePath);
             }
@@ -204,7 +213,7 @@ public static partial class Calibration
     {
         if (SolveCamera == null || !SolveCamera.connected)
         {
-            Logger.Warn("AutoCalibrate: no camera connected.");
+            Logger.Error("AutoCalibrate: no camera connected.");
             return null;
         }
 
@@ -226,7 +235,7 @@ public static partial class Calibration
 
         if (initSolve == null)
         {
-            Logger.Warn("AutoCalibrate: Failed to plate-solve initial position. Aborting.");
+            Logger.Error("AutoCalibrate: Failed to plate-solve initial position. Aborting.");
             CalibrationUpdated?.Invoke(new AutoProgressInfo { Message = "Failed to solve initial position. Aborting." });
             return null;
         }
@@ -347,7 +356,7 @@ public static partial class Calibration
                 }
                 catch (Exception ex)
                 {
-                    Logger.Warn($"AutoCalibrate: capture failed at pos {posNum}: {ex.Message}");
+                    Logger.Error($"AutoCalibrate: capture failed at pos {posNum}: {ex.Message}");
                     failed++;
                     continue;
                 }
@@ -359,7 +368,7 @@ public static partial class Calibration
                 
                 if (solve == null)
                 {
-                    Logger.Warn($"AutoCalibrate: solve failed at pos {posNum}");
+                    Logger.Error($"AutoCalibrate: solve failed at pos {posNum}");
                     CalibrationUpdated?.Invoke(new AutoProgressInfo { 
                         Message = $"Position {posNum}/{totalPositions}: solve failed",
                         CurrentPosition = posNum, TotalPositions = totalPositions,
@@ -453,7 +462,7 @@ public static partial class Calibration
         var centerResult = await AutoCenterAsync(targetRA, targetDec, maxIterations: 5, tolerancePx: 15.0, ct: guideCt);
         if (centerResult == null || !centerResult.Success)
         {
-            Logger.Warn("GuidedTracking: initial centering failed");
+            Logger.Error("GuidedTracking: initial centering failed");
             return centerResult;
         }
 
@@ -481,7 +490,7 @@ public static partial class Calibration
                 }
                 catch (Exception ex)
                 {
-                    Logger.Warn($"GuidedTracking: guide capture failed: {ex.Message}");
+                    Logger.Error($"GuidedTracking: guide capture failed: {ex.Message}");
                     continue;
                 }
 
@@ -490,7 +499,7 @@ public static partial class Calibration
                 var solve = await PlateSolver.SolveAsync(imagePath, targetRA, targetDec, 10.0, guideCt);
                 if (solve == null)
                 {
-                    Logger.Warn("GuidedTracking: guide solve failed, skipping");
+                    Logger.Error("GuidedTracking: guide solve failed, skipping");
                     TryDeleteFile(imagePath);
                     continue;
                 }
@@ -508,8 +517,9 @@ public static partial class Calibration
                         (float)solve.RaCenterHours, (float)solve.DecCenterDeg,
                         mountPos.XArcsecs, mountPos.YArcsecs, mountPos.ZArcsecs, guideCaptureTime);
 
-                    await UartClient.Client.StopAll();
-                    await Task.Delay(500, guideCt);
+                    // Note: MoveRelative already stops celestial tracking on the Pico internally.
+                    // DO NOT call StopAll() — it sends CMD_STOP which disables motors and loses calibration.
+                    await Task.Delay(200, guideCt);
 
                     var targetAltAz = ComputeAltAz(targetRA, targetDec, guideCaptureTime, Latitude, Longitude);
                     var actualAltAz = ComputeAltAz(solve.RaCenterHours, solve.DecCenterDeg, guideCaptureTime, Latitude, Longitude);

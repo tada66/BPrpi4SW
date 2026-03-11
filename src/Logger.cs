@@ -6,11 +6,12 @@ internal enum LogLevel
 {
     Trace = 0,
     Debug = 1,
-    Info  = 2,
-    Notice = 3,
-    Warn  = 4,
-    Error = 5,
-    Fatal = 6
+    Status = 2,
+    Info  = 3,
+    Notice = 4,
+    Warn  = 5,
+    Error = 6,
+    Fatal = 7
 }
 
 internal static class Logger
@@ -25,7 +26,7 @@ internal static class Logger
         return logFile;
     });
 
-    public static LogLevel MinimumLevel { get; set; } = LogLevel.Info;
+    public static LogLevel MinimumLevel { get; set; } = LogLevel.Status;
 
     private static void Log(string message,
         LogLevel level = LogLevel.Info,
@@ -57,6 +58,7 @@ internal static class Logger
     {
         LogLevel.Trace => ConsoleColor.DarkGray,
         LogLevel.Debug => ConsoleColor.Gray,
+        LogLevel.Status => ConsoleColor.Gray,
         LogLevel.Info => ConsoleColor.White,
         LogLevel.Notice => ConsoleColor.Cyan,
         LogLevel.Warn => ConsoleColor.Yellow,
@@ -77,6 +79,12 @@ internal static class Logger
         [CallerFilePath] string callerFile = "",
         [CallerLineNumber] int callerLine = 0) =>
         Log(message, LogLevel.Debug, caller, callerFile, callerLine);
+
+    public static void Status(string message,
+        [CallerMemberName] string caller = "",
+        [CallerFilePath] string callerFile = "",
+        [CallerLineNumber] int callerLine = 0) =>
+        Log(message, LogLevel.Status, caller, callerFile, callerLine);
 
     public static void Info(string message,
         [CallerMemberName] string caller = "",

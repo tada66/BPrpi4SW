@@ -59,15 +59,22 @@ public static class PlateSolver
         try
         {
             Directory.CreateDirectory(TempDir);
-            // Force astrometry.net and its Python scripts (via tempfile module) to use our TempDir 
+            // Force astrometry.net and its Python scripts (via tempfile module) to use our TempDir
             // instead of the RAMdisk `/tmp`, which easily runs out of space.
             Environment.SetEnvironmentVariable("TMPDIR", TempDir);
 
-            // Clean up old files left over from previous crashes
+            // Clean up old files left over from previous crashes in TempDir.
             foreach (var file in Directory.GetFiles(TempDir))
             {
                 try { File.Delete(file); } catch { }
             }
+
+            // Also sweep /tmp for stale astrometry.net files left by killed solve attempts.
+            // These are safe to delete: solve-field writes *.wcs / *.rdls / *.axy / *.xyls /
+            // *.solved / *.match / *.corr and tmp.solve-field.* scratch dirs.
+            // Each set can consume 50-150 MB; a full /tmp (tmpfs) causes dcraw to fail
+            // with "No space left on device" even when the main filesystem has plenty of room.
+            CleanupAstrometryTmp("/tmp");
         }
         catch { }
     }
@@ -365,7 +372,7 @@ public static class PlateSolver
         }
         catch (Exception ex)
         {
-            Logger.Warn($"PlateSolver: WCS parse error: {ex.Message}");
+            Logger.Error($"PlateSolver: WCS parse error: {ex.Message}");
             return null;
         }
     }
@@ -455,10 +462,62 @@ public static class PlateSolver
             }
             // Also clean subdirectories that solve-field may create
             foreach (string subDir in Directory.GetDirectories(dir))
-            {
-                try { Directory.Delete(subDir, true); } catch { }
+            {try { Directory.Delete(subDir, true); } catch { }
             }
         }
         catch { }
+    }
+
+    /// <summary>
+    /// Deletes stale astrometry.net files left in <paramref name="tmpPath"/> (usually /tmp)
+    /// by crashed or killed solve-field runs.  Each aborted run can leave 50-150 MB of
+    /// .wcs / .rdls / .axy / .xyls / .solved / .match / .corr files plus tmp.solve-field.*
+    /// scratch directories.  On a 454 MB tmpfs this quickly fills /tmp and causes dcraw to
+    /// fail with "No space left on device" even when the main filesystem is fine.
+    /// Only patterns known to be produced by astrometry.net are touched.
+    /// </summary>
+    private static void CleanupAstrometryTmp(string tmpPath)
+    {
+        if (!Directory.Exists(tmpPath)) return;
+        try
+        {
+            long freedBytes = 0;
+            // astrometry.net output file extensions
+            var astroExts = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+                { ".wcs", ".rdls", ".axy", ".xyls", ".solved", ".match", ".corr", ".new" };
+
+            foreach (string file in Directory.GetFiles(tmpPath))
+            {
+                string ext = Path.GetExtension(file);
+                if (!astroExts.Contains(ext)) continue;
+                try
+                {
+                    long sz = new FileInfo(file).Length;
+                    File.Delete(file);
+                    freedBytes += sz;
+                }
+                catch { }
+            }
+
+            // solve-field also creates tmp.solve-field.XXXXX scratch directories
+            foreach (string dir in Directory.GetDirectories(tmpPath, "tmp.solve-field.*"))
+            {
+                try
+                {
+                    long sz = Directory.GetFiles(dir, "*", SearchOption.AllDirectories)
+                        .Sum(f => { try { return new FileInfo(f).Length; } catch { return 0; } });
+                    Directory.Delete(dir, true);
+                    freedBytes += sz;
+                }
+                catch { }
+            }
+
+            if (freedBytes > 0)
+                Logger.Notice($"PlateSolver: cleaned up {freedBytes / (1024 * 1024)} MB of stale astrometry files from {tmpPath}");
+        }
+        catch (Exception ex)
+        {
+            Logger.Debug($"CleanupAstrometryTmp({tmpPath}): {ex.Message}");
+        }
     }
 }

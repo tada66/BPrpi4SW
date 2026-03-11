@@ -388,7 +388,7 @@ public sealed class UartClient : IDisposable
 
                         string stateStr = $"{(enabled ? "ENABLED" : "DISABLED")}, {(paused ? "PAUSED" : "RUNNING")}";
                         string celestialStr = celestialTracking ? "TRACKING" : "INACTIVE";
-                        Logger.Info($"Status: Temp={temp:F2}°C, Positions: X={x}, Y={y}, Z={z} arcseconds, Motors: {stateStr}, Celestial Tracking: {celestialStr}, Fan={fanPct}%, MSGID={msgId}");
+                        Logger.Status($"Status: Temp={temp:F2}°C, Positions: X={x}, Y={y}, Z={z} arcseconds, Motors: {stateStr}, Celestial Tracking: {celestialStr}, Fan={fanPct}%, MSGID={msgId}");
                         
                         StatusReceived?.Invoke(temp, x, y, z, enabled, paused, celestialTracking, fanPct);
                     }
@@ -500,14 +500,17 @@ public sealed class UartClient : IDisposable
     /// <param name="alignMatrix">3x3 alignment matrix (9 floats, row-major) — may be rotation or affine</param>
     /// <param name="refTime">Unix timestamp (UTC) when tracking starts</param>
     /// <param name="latitude">Observer latitude in degrees</param>
-    public Task<bool> StartCelestialTracking(float targetRA, float targetDec, float[] alignMatrix, long refTime, float latitude)
+    /// <param name="mountOffsetX">X-axis (altitude) motor offset in arcseconds: trueAlt_arcsec - motorX_arcsec</param>
+    /// <param name="mountOffsetZ">Z-axis (azimuth)  motor offset in arcseconds: trueAz_arcsec  - motorZ_arcsec</param>
+    public Task<bool> StartCelestialTracking(float targetRA, float targetDec, float[] alignMatrix, long refTime, float latitude, int mountOffsetX, int mountOffsetZ)
     {
         if (alignMatrix.Length != 9)
             throw new ArgumentException("alignMatrix must have exactly 9 elements (3x3)", nameof(alignMatrix));
 
-        Logger.Notice($"Starting celestial tracking: RA={targetRA:F4}h, Dec={targetDec:F4}°, refTime={refTime}");
+        Logger.Notice($"Starting celestial tracking: RA={targetRA:F4}h, Dec={targetDec:F4}°, refTime={refTime}, offsets=({mountOffsetX},{mountOffsetZ})");
 
-        var data = new byte[56];
+        // Payload: RA(4) + Dec(4) + matrix(36) + refTime(8) + latitude(4) + offsetX(4) + offsetZ(4) = 64 bytes
+        var data = new byte[64];
         int offset = 0;
 
         // targetRA (float, 4 bytes)
@@ -531,6 +534,14 @@ public sealed class UartClient : IDisposable
 
         // latitude (float, 4 bytes)
         Array.Copy(BitConverter.GetBytes(latitude), 0, data, offset, 4);
+        offset += 4;
+
+        // mountOffsetX (int32, 4 bytes)
+        Array.Copy(BitConverter.GetBytes(mountOffsetX), 0, data, offset, 4);
+        offset += 4;
+
+        // mountOffsetZ (int32, 4 bytes)
+        Array.Copy(BitConverter.GetBytes(mountOffsetZ), 0, data, offset, 4);
 
         return SendCommandAsync(UartCommand.CMD_TRACK_CELESTIAL, data);
     }

@@ -1556,7 +1556,7 @@ public static partial class Calibration
     {
         if (!IsAligned)
         {
-            Logger.Warn("Cannot start tracking - not aligned! Add at least 2 alignment points first.");
+            Logger.Error("Cannot start tracking - not aligned! Add at least 2 alignment points first.");
             return false;
         }
 
@@ -1743,7 +1743,9 @@ public static partial class Calibration
             targetDec,
             trackingMatrix,
             refTime,
-            (float)Latitude
+            (float)Latitude,
+            (int)_mountXOffsetArcsec,
+            (int)_mountZOffsetArcsec
         );
     }
 
