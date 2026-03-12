@@ -388,7 +388,7 @@ public sealed class UartClient : IDisposable
 
                         string stateStr = $"{(enabled ? "ENABLED" : "DISABLED")}, {(paused ? "PAUSED" : "RUNNING")}";
                         string celestialStr = celestialTracking ? "TRACKING" : "INACTIVE";
-                        Logger.Status($"Status: Temp={temp:F2}°C, Positions: X={x}, Y={y}, Z={z} arcseconds, Motors: {stateStr}, Celestial Tracking: {celestialStr}, Fan={fanPct}%, MSGID={msgId}");
+                        Logger.Status($"Status: Temp={temp:F2}°C, Positions: X={x}, Y={y}, Z={z} arcs, Motors: {stateStr}, Celestial Tracking: {celestialStr}, Fan={fanPct}%, MSGID={msgId}");
                         
                         StatusReceived?.Invoke(temp, x, y, z, enabled, paused, celestialTracking, fanPct);
                     }

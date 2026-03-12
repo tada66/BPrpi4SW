@@ -77,9 +77,9 @@ public class MessageRouter
                 // ── Plate-Solve ──
                 "mount.auto_center"      => await _mountController.AutoCenterAsync(msg.GetPayload<AutoCenterPayload>()!),
                 "mount.auto_calibrate"   => await _mountController.AutoCalibrateAsync(msg.GetPayload<AutoCalibratePayload>() ?? new AutoCalibratePayload()),
-                "mount.guided_tracking"  => await _mountController.StartGuidedTrackingAsync(msg.GetPayload<GuidedTrackingPayload>()!),
-                "mount.guided_tracking.stop" => _mountController.StopGuidedTracking(),
-                "mount.cancel"               => _mountController.CancelAutoOperation(),
+                "mount.guide.start"      => await _mountController.StartGuidedTrackingAsync(msg.GetPayload<GuidedTrackingPayload>()!),
+                "mount.guide.stop"       => _mountController.StopGuidedTracking(),
+                "mount.cancel"           => _mountController.CancelAutoOperation(),
                 "mount.solve_current"    => await _mountController.SolveCurrentAsync(),
                 "mount.solver.configure" => _mountController.ConfigurePlateSolver(msg.GetPayload<PlateSolveConfigPayload>() ?? new PlateSolveConfigPayload()),
 

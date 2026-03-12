@@ -280,7 +280,27 @@ public record AutoCalibratePayload(
 public record GuidedTrackingPayload(
     [property: JsonPropertyName("ra")] float Ra,
     [property: JsonPropertyName("dec")] float Dec,
-    [property: JsonPropertyName("interval")] int Interval = 60
+    [property: JsonPropertyName("interval")] int Interval = 60,
+    [property: JsonPropertyName("maxCorrections")] int MaxCorrections = 3  // 0 = unlimited
+);
+
+/// <summary>Broadcast after every guide check (whether or not a correction was applied).</summary>
+public record GuidedTrackingProgressPayload(
+    [property: JsonPropertyName("check")] int Check,
+    [property: JsonPropertyName("maxCorrections")] int MaxCorrections,
+    [property: JsonPropertyName("corrections")] int Corrections,
+    [property: JsonPropertyName("driftPx")] double DriftPx,
+    [property: JsonPropertyName("driftArcmin")] double DriftArcmin,
+    [property: JsonPropertyName("correctionApplied")] bool CorrectionApplied,
+    [property: JsonPropertyName("corrXArcsec")] int? CorrXArcsec,
+    [property: JsonPropertyName("corrZArcsec")] int? CorrZArcsec
+);
+
+/// <summary>Broadcast once when the guide loop exits for any reason.</summary>
+public record GuidedTrackingCompletePayload(
+    [property: JsonPropertyName("checks")] int Checks,
+    [property: JsonPropertyName("corrections")] int Corrections,
+    [property: JsonPropertyName("reason")] string Reason  // "maxCorrectionsReached" | "stopped" | "error"
 );
 
 public record PlateSolveConfigPayload(

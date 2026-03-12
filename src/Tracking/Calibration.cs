@@ -14,6 +14,22 @@ public static partial class Calibration
 {
     public static event Action<AutoProgressInfo>? CalibrationUpdated;
 
+    /// <summary>Fired after each guide-loop check (correction or no-op).</summary>
+    public static event Action<GuidedTrackingProgressInfo>? GuidedTrackingProgress;
+
+    /// <summary>Per-check telemetry broadcast to the UI during guided tracking.</summary>
+    public class GuidedTrackingProgressInfo
+    {
+        public int Check { get; set; }
+        public int MaxCorrections { get; set; }
+        public int Corrections { get; set; }
+        public double DriftPx { get; set; }
+        public double DriftArcmin { get; set; }
+        public bool CorrectionApplied { get; set; }
+        public int? CorrXArcsec { get; set; }
+        public int? CorrZArcsec { get; set; }
+    }
+
     /// <summary>
     /// An alignment point: a known star's celestial coords + the mount's encoder readings when pointed at it.
     /// </summary>

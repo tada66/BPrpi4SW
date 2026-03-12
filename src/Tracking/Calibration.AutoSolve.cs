@@ -66,13 +66,15 @@ public static partial class Calibration
             return null;
         }
 
-        {
-            var lastPt = _points[^1];
-            var curAltAz = ComputeAltAz(lastPt.RA, lastPt.Dec, DateTime.UtcNow, Latitude, Longitude);
-            var tgtAltAz = ComputeAltAz(targetRA, targetDec, DateTime.UtcNow, Latitude, Longitude);
-            double maxDelta = Math.Max(Math.Abs(tgtAltAz.alt - curAltAz.alt), Math.Abs(tgtAltAz.az - curAltAz.az));
-            await WaitForMoveCompleteAsync((int)(maxDelta * 3600), ct);
-        }
+        // Wait for the Pico's initial slew to complete.
+        // StartTrackingAsync sends CMD_TRACK_CELESTIAL which makes the Pico slew to the
+        // predicted sky position and then engage sidereal tracking.  We CANNOT use
+        // WaitForMoveCompleteAsync here — that polls until motor positions stop changing,
+        // but during celestial tracking the motors move continuously at sidereal rate
+        // (~15"/s on X) and NEVER stop.  On 2026-03-11 this caused AutoCenter to hang
+        // forever at this point, blocking all guided tracking corrections.
+        // Instead, wait for the Pico to report celestialTracking==true (end of initial slew).
+        await Tracker.WaitForCelestialTrackingAsync(15000, ct);
 
         double lastErrorPx = double.MaxValue;
         int iteration = 0;
@@ -450,6 +452,7 @@ public static partial class Calibration
     public static async Task<AutoCenterResult?> StartGuidedTrackingAsync(
         float targetRA, float targetDec,
         int guideIntervalSeconds = 60,
+        int maxCorrections = 3,          // 0 = unlimited (run until manually stopped)
         CancellationToken ct = default)
     {
         StopGuidedTracking();
@@ -457,7 +460,7 @@ public static partial class Calibration
         _guideCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         var guideCt = _guideCts.Token;
 
-        Logger.Notice($"GuidedTracking: target RA={targetRA:F4}h, Dec={targetDec:F4}°, guide interval={guideIntervalSeconds}s");
+        Logger.Notice($"GuidedTracking: target RA={targetRA:F4}h, Dec={targetDec:F4}°, guide interval={guideIntervalSeconds}s, maxCorrections={maxCorrections}");
 
         var centerResult = await AutoCenterAsync(targetRA, targetDec, maxIterations: 5, tolerancePx: 15.0, ct: guideCt);
         if (centerResult == null || !centerResult.Success)
@@ -472,6 +475,7 @@ public static partial class Calibration
         int corrections = 0;
         int checks = 0;
 
+        string exitReason = "stopped";
         try
         {
             while (!guideCt.IsCancellationRequested)
@@ -511,6 +515,10 @@ public static partial class Calibration
 
                 Logger.Notice($"GuidedTracking: check #{checks} — drift={errorPx:F1}px ({errorDeg * 60:F1}')");
 
+                bool correctionApplied = false;
+                int? corrXArcsec = null;
+                int? corrZArcsec = null;
+
                 if (errorPx > 3.0)
                 {
                     AddAlignmentPoint(
@@ -529,18 +537,19 @@ public static partial class Calibration
                     if (corrAz > 180.0) corrAz -= 360.0;
                     if (corrAz < -180.0) corrAz += 360.0;
 
-                    int corrXArcsec = (int)(corrAlt * 3600.0);
-                    int corrZArcsec = (int)(corrAz * 3600.0);
+                    corrXArcsec = (int)(corrAlt * 3600.0);
+                    corrZArcsec = (int)(corrAz * 3600.0);
 
                     Logger.Notice($"GuidedTracking: correction X={corrXArcsec}\", Z={corrZArcsec}\"");
-                    await UartClient.Client.MoveRelative(Axis.X, corrXArcsec);
-                    await UartClient.Client.MoveRelative(Axis.Z, corrZArcsec);
+                    await UartClient.Client.MoveRelative(Axis.X, corrXArcsec.Value);
+                    await UartClient.Client.MoveRelative(Axis.Z, corrZArcsec.Value);
 
-                    int maxCorr = Math.Max(Math.Abs(corrXArcsec), Math.Abs(corrZArcsec));
+                    int maxCorr = Math.Max(Math.Abs(corrXArcsec.Value), Math.Abs(corrZArcsec.Value));
                     await WaitForMoveCompleteAsync(maxCorr, guideCt);
                     await StartTrackingAsync(targetRA, targetDec);
 
                     corrections++;
+                    correctionApplied = true;
                     Logger.Notice($"GuidedTracking: correction #{corrections} applied ({errorPx:F1}px → recentered)");
                 }
                 else
@@ -548,7 +557,28 @@ public static partial class Calibration
                     Logger.Notice($"GuidedTracking: on target ({errorPx:F1}px ≤ 3px threshold)");
                 }
 
+                // Broadcast per-check progress to UI
+                GuidedTrackingProgress?.Invoke(new GuidedTrackingProgressInfo
+                {
+                    Check = checks,
+                    MaxCorrections = maxCorrections,
+                    Corrections = corrections,
+                    DriftPx = Math.Round(errorPx, 1),
+                    DriftArcmin = Math.Round(errorDeg * 60.0, 2),
+                    CorrectionApplied = correctionApplied,
+                    CorrXArcsec = corrXArcsec,
+                    CorrZArcsec = corrZArcsec
+                });
+
                 TryDeleteFile(imagePath);
+
+                // Stop automatically when the requested number of guide cycles has been reached
+                if (maxCorrections > 0 && checks >= maxCorrections)
+                {
+                    Logger.Notice($"GuidedTracking: maxCorrections ({maxCorrections}) reached after {checks} checks, {corrections} corrections — stopping");
+                    exitReason = "maxCorrectionsReached";
+                    break;
+                }
             }
         }
         catch (OperationCanceledException)
@@ -560,8 +590,10 @@ public static partial class Calibration
         {
             Success = true,
             Iterations = corrections,
+            CheckCount = checks,
             FinalErrorPx = 0,
-            Message = $"Guided tracking ended: {corrections} corrections over {checks} checks"
+            Message = $"Guided tracking ended ({exitReason}): {corrections} corrections over {checks} checks",
+            ExitReason = exitReason
         };
     }
 
@@ -673,6 +705,10 @@ public static partial class Calibration
         public double SolvedRA { get; set; }
         public double SolvedDec { get; set; }
         public string Message { get; set; } = "";
+        /// <summary>"maxCorrectionsReached" | "stopped" | "error" | null for regular auto-center</summary>
+        public string? ExitReason { get; set; }
+        /// <summary>Total number of plate-solve checks performed (guided tracking only).</summary>
+        public int CheckCount { get; set; }
     }
 
     /// <summary>Result of an auto-calibration operation.</summary>

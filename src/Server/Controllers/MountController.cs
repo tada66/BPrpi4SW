@@ -30,6 +30,23 @@ public class MountController : IDisposable
         UartClient.Client.PositionReceived += OnPositionReceived;
         UartClient.Client.ReferenceLost += OnReferenceLost;
         Calibration.CalibrationUpdated += OnCalibrationUpdated;
+        Calibration.GuidedTrackingProgress += OnGuidedTrackingProgress;
+    }
+
+    private void OnGuidedTrackingProgress(Calibration.GuidedTrackingProgressInfo info)
+    {
+        if (!_wsServer.HasClient) return;
+        _ = _wsServer.SendMessageAsync(Message.Event("mount.guide.progress",
+            new GuidedTrackingProgressPayload(
+                Check: info.Check,
+                MaxCorrections: info.MaxCorrections,
+                Corrections: info.Corrections,
+                DriftPx: info.DriftPx,
+                DriftArcmin: info.DriftArcmin,
+                CorrectionApplied: info.CorrectionApplied,
+                CorrXArcsec: info.CorrXArcsec,
+                CorrZArcsec: info.CorrZArcsec
+            )));
     }
 
     private void OnCalibrationUpdated(Calibration.AutoProgressInfo info)
@@ -204,6 +221,7 @@ public class MountController : IDisposable
         UartClient.Client.PositionReceived -= OnPositionReceived;
         UartClient.Client.ReferenceLost -= OnReferenceLost;
         Calibration.CalibrationUpdated -= OnCalibrationUpdated;
+        Calibration.GuidedTrackingProgress -= OnGuidedTrackingProgress;
     }
 
     // ── Plate-solve assisted operations ──
@@ -346,31 +364,37 @@ public class MountController : IDisposable
             try
             {
                 var centerResult = await Calibration.StartGuidedTrackingAsync(
-                    payload.Ra, payload.Dec, payload.Interval, ct: ct);
+                    payload.Ra, payload.Dec,
+                    guideIntervalSeconds: payload.Interval,
+                    maxCorrections: payload.MaxCorrections,
+                    ct: ct);
 
                 if (_wsServer.HasClient)
                 {
-                    _ = _wsServer.SendMessageAsync(Message.Event("mount.guided_tracking.complete", new
-                    {
-                        success = centerResult?.Success ?? false,
-                        message = centerResult?.Message ?? "Guided tracking ended"
-                    }));
+                    string reason = centerResult?.ExitReason ?? "stopped";
+                    _ = _wsServer.SendMessageAsync(Message.Event("mount.guide.complete",
+                        new GuidedTrackingCompletePayload(
+                            Checks: centerResult?.CheckCount ?? 0,
+                            Corrections: centerResult?.Iterations ?? 0,
+                            Reason: reason
+                        )));
                 }
             }
             catch (OperationCanceledException)
             {
                 if (_wsServer.HasClient)
-                    _ = _wsServer.SendMessageAsync(Message.Event("mount.guided_tracking.stopped"));
+                    _ = _wsServer.SendMessageAsync(Message.Event("mount.guide.complete",
+                        new GuidedTrackingCompletePayload(Checks: 0, Corrections: 0, Reason: "stopped")));
             }
             catch (Exception ex)
             {
                 Logger.Error($"GuidedTracking error: {ex.Message}");
                 if (_wsServer.HasClient)
-                    _ = _wsServer.SendMessageAsync(Message.Event("mount.guided_tracking.error", new { message = ex.Message }));
+                    _ = _wsServer.SendMessageAsync(Message.Event("mount.guide.error", new { message = ex.Message }));
             }
         });
 
-        return Task.FromResult<object>(new { message = "Guided tracking started", ra = payload.Ra, dec = payload.Dec, interval = payload.Interval });
+        return Task.FromResult<object>(new { message = "Guided tracking started", ra = payload.Ra, dec = payload.Dec, interval = payload.Interval, maxCorrections = payload.MaxCorrections });
     }
 
     public object StopGuidedTracking()
