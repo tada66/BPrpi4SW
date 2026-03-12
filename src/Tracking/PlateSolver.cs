@@ -147,7 +147,7 @@ public static class PlateSolver
             double scaleHigh = scale * 1.3;
 
             // When dcraw already halved the image, don't downsample again in solve-field
-            //int effectiveDownsample = dcrawHalved ? 1 : Downsample;
+            // (dcraw -h already halves resolution, so effective plate scale is doubled)
 
             // Use a unique prefix per solve to avoid file collisions
             string prefix = $"solve_{DateTime.UtcNow:yyyyMMdd_HHmmss}_{Guid.NewGuid():N}";
@@ -229,10 +229,6 @@ public static class PlateSolver
         {
             // Cleanup temp files (keep input image, clean solve artifacts)
             CleanupTempFiles(TempDir);
-            /*if (convertedFile != null && File.Exists(convertedFile))
-                try { File.Delete(convertedFile); } catch { }
-            if (croppedFile != null && File.Exists(croppedFile))
-                try { File.Delete(croppedFile); } catch { }*/
         }
     }
 

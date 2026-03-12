@@ -226,15 +226,6 @@ public class MountController : IDisposable
 
     // ── Plate-solve assisted operations ──
 
-    /// <summary>
-    /// Bind the camera instance for plate-solve operations.
-    /// Called when a camera connects.
-    /// </summary>
-    public void SetSolveCamera(Camera? camera)
-    {
-        Calibration.SolveCamera = camera;
-    }
-
     public Task<object> AutoCenterAsync(AutoCenterPayload payload)
     {
         EnsureSolveCamera();

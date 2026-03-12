@@ -344,7 +344,9 @@ public static partial class Calibration
 
                 Logger.Notice($"AutoCalibrate: position {posNum}/{totalPositions} — alt={targetAlt:F1}°, az={targetAz:F1}° (moveX: {moveX}, moveZ: {moveZ})");
 
-                await MoveMotorWithOvershootAsync(moveX, moveZ);
+                await UartClient.Client.ResumeMotors();
+                await UartClient.Client.MoveRelative(Axis.X, moveX);
+                await UartClient.Client.MoveRelative(Axis.Z, moveZ);
 
                 double maxMoveDeg = Math.Max(Math.Abs(moveX / 3600.0), Math.Abs(moveZ / 3600.0));
                 await WaitForMoveCompleteAsync((int)(maxMoveDeg * 3600), ct);
@@ -416,7 +418,9 @@ public static partial class Calibration
                 int moveX = startX - currentPos.XArcsecs;
                 int moveZ = startZ - currentPos.ZArcsecs;
                 
-                await MoveMotorWithOvershootAsync(moveX, moveZ);
+                await UartClient.Client.ResumeMotors();
+                await UartClient.Client.MoveRelative(Axis.X, moveX);
+                await UartClient.Client.MoveRelative(Axis.Z, moveZ);
                 
                 double returnMoveDeg = Math.Max(Math.Abs(moveX / 3600.0), Math.Abs(moveZ / 3600.0));
                 await WaitForMoveCompleteAsync((int)(returnMoveDeg * 3600), CancellationToken.None);
@@ -643,36 +647,6 @@ public static partial class Calibration
     }
 
     // ── Helper methods for plate-solve operations ──
-
-    /// <summary>
-    /// Convert alt-az coordinates back to RA/Dec for a given time and location.
-    /// Inverse of ComputeAltAz.
-    /// </summary>
-    public static (double raHours, double decDeg) AltAzToRaDec(
-        double altDeg, double azDeg, DateTime utcTime, double latDeg, double lonDeg)
-    {
-        double altRad = altDeg * Math.PI / 180.0;
-        double azRad = azDeg * Math.PI / 180.0;
-        double latRad = latDeg * Math.PI / 180.0;
-
-        double sinDec = Math.Sin(altRad) * Math.Sin(latRad) + Math.Cos(altRad) * Math.Cos(latRad) * Math.Cos(azRad);
-        sinDec = Math.Max(-1.0, Math.Min(1.0, sinDec));
-        double decRad = Math.Asin(sinDec);
-
-        double cosHA = (Math.Sin(altRad) - Math.Sin(decRad) * Math.Sin(latRad)) / (Math.Cos(decRad) * Math.Cos(latRad));
-        cosHA = Math.Max(-1.0, Math.Min(1.0, cosHA));
-        double haRad = Math.Acos(cosHA);
-        if (Math.Sin(azRad) > 0)
-            haRad = 2 * Math.PI - haRad;
-
-        double haDeg = haRad * 180.0 / Math.PI;
-        double lst = ComputeLocalSiderealTime(utcTime, lonDeg);
-
-        double raHours = lst - haDeg / 15.0;
-        raHours = ((raHours % 24.0) + 24.0) % 24.0;
-
-        return (raHours, decRad * 180.0 / Math.PI);
-    }
 
     /// <summary>
     /// Wait for mount movement to complete by continuously polling

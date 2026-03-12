@@ -1,14 +1,12 @@
 using System;
 using System.Diagnostics;
-using System.Globalization;
 using System.IO;
-using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 
 internal class ExternalProcess
 {
-        // ── Process execution ──
+    // ── Process execution ──
 
     /// <summary>
     /// Run an external process and capture stdout/stderr.
@@ -51,7 +49,6 @@ internal class ExternalProcess
     internal static async Task<(int exitCode, string stdout, string stderr)> RunProcessCoreAsync(
         ProcessStartInfo psi, int timeoutSeconds, CancellationToken ct, string? stdoutFile = null)
     {
-
         using var process = new Process { StartInfo = psi };
 
         try

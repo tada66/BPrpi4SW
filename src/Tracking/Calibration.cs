@@ -95,11 +95,9 @@ public static partial class Calibration
     // Last alignment computation result
     private static AlignmentResult? _lastResult = null;
 
-    // Mount encoder offset: corrects for unknown mount zero position.
-    // Motor arcseconds ≠ true alt/az — the offset maps raw encoder values to
-    // true sky angles so MountToUnitVector produces correct angular distances.
-    private static double _mountXOffsetArcsec = 0; // trueAlt*3600 - MountX
-    private static double _mountZOffsetArcsec = 0; // trueAz*3600 - MountZ
+    // Mount encoder offset: maps raw encoder values to true sky angles.
+    private static double _mountXOffsetArcsec = 0;
+    private static double _mountZOffsetArcsec = 0;
     private static bool _mountOffsetKnown = false;
 
     // Observer location (degrees)
@@ -127,17 +125,12 @@ public static partial class Calibration
         Logger.Notice("Alignment reset - all points cleared");
     }
 
-    /// <summary>
-    /// Set the mount encoder offset from a known sky position and motor readings.
-    /// This corrects MountToUnitVector so that angular distances between mount
-    /// vectors match real sky angular distances.
-    /// </summary>
     public static void SetMountOffset(double trueAltDeg, double trueAzDeg, int mountXArcsec, int mountZArcsec)
     {
         _mountXOffsetArcsec = trueAltDeg * 3600.0 - mountXArcsec;
         _mountZOffsetArcsec = trueAzDeg * 3600.0 - mountZArcsec;
         _mountOffsetKnown = true;
-        Logger.Notice($"Mount offset computed: Δalt={_mountXOffsetArcsec / 3600:F2}° ({_mountXOffsetArcsec:F0}\"), Δaz={_mountZOffsetArcsec / 3600:F2}° ({_mountZOffsetArcsec:F0}\")");
+        Logger.Notice($"Mount offset: Δalt={_mountXOffsetArcsec / 3600:F2}°, Δaz={_mountZOffsetArcsec / 3600:F2}°");
     }
 
     /// <summary>
@@ -593,8 +586,7 @@ public static partial class Calibration
                             bestActive = newActive;
                             rejected = newRejected;
                             _activeIndices = new List<int>(bestActive);
-                            Logger.Notice($"  *** Using AFFINE alignment matrix ({newActive.Count} stars) ***");
-                            Logger.Notice($"  *** Pico firmware MUST normalize mount vector before asin/atan2 ***");
+                            Logger.Notice($"  Using AFFINE alignment ({newActive.Count} stars)");
                         }
                     }
                 }
@@ -616,102 +608,35 @@ public static partial class Calibration
         else if (_isAffineMatrix)
             Logger.Notice($"  {bestActive.Count}-star affine alignment (captures mount distortion)");
 
-        // Calibration coverage report
-        {
-            double minDec = double.MaxValue, maxDec = double.MinValue;
-            double minRA = double.MaxValue, maxRA = double.MinValue;
-            for (int ai = 0; ai < bestActive.Count; ai++)
-            {
-                int idx = bestActive[ai];
-                if (_points[idx].Dec < minDec) minDec = _points[idx].Dec;
-                if (_points[idx].Dec > maxDec) maxDec = _points[idx].Dec;
-                if (_points[idx].RA < minRA) minRA = _points[idx].RA;
-                if (_points[idx].RA > maxRA) maxRA = _points[idx].RA;
-            }
-            double decSpan = maxDec - minDec;
-            double raSpan = (maxRA - minRA) * 15.0; // Convert hours to degrees
-            Logger.Notice($"  Calibration coverage: Dec [{minDec:F1}° to {maxDec:F1}°] (span {decSpan:F1}°), RA [{minRA:F1}h to {maxRA:F1}h] (span {raSpan:F1}°)");
-            if (decSpan < 10.0 && bestActive.Count <= 2)
-                Logger.Notice($"  TIP: Stars are close in declination ({decSpan:F1}°). Add a star at different Dec for better sky coverage.");
-            if (decSpan < 5.0 && raSpan < 30.0 && bestActive.Count <= 2)
-                Logger.Warn($"  *** Calibration covers a very small sky area — expect errors beyond {Math.Max(decSpan, raSpan):F0}° from this zone ***");
-        }
-
         // Zenith proximity detection
-        // At mount-alt near 90°, cos(alt)→0 and azimuth loses all resolution
-        // in unit-vector space (alt-az singularity). This makes pairwise
-        // separation comparisons meaningless — NOT step loss.
-        bool anyNearZenith = false;
         for (int i = 0; i < _points.Count; i++)
         {
-            // Check mount-frame altitude (X encoder = altitude in arcsec)
             double mountAltDeg = _points[i].MountX / 3600.0;
-            double cosAlt = Math.Cos(mountAltDeg * Math.PI / 180.0);
-
-            // Check true sky altitude
-            var (trueAlt, trueAz) = ComputeAltAz(_points[i].RA, _points[i].Dec, _points[i].TimeUtc, Latitude, Longitude);
-
-            bool isRejected = rejected.Contains(i);
-            string statusTag = isRejected ? " [EXCLUDED]" : "";
-
-            if (Math.Abs(cosAlt) < 0.26) // Mount tilt within ~15° of 90°
-            {
-                anyNearZenith = true;
-                Logger.Warn($"  *** Star{i + 1}{statusTag}: mount tilt={mountAltDeg:F1}° (near 90°) — azimuth axis loses resolution (zenith singularity) ***");
-            }
-            if (trueAlt > 75.0)
-            {
-                Logger.Warn($"  Star{i + 1}{statusTag}: true altitude={trueAlt:F1}° — near zenith, alignment accuracy degrades above 75°");
-            }
-        }
-        if (anyNearZenith)
-        {
-            Logger.Warn($"  TIP: Best alignment accuracy is with stars at 30°-70° altitude.");
+            if (Math.Abs(Math.Cos(mountAltDeg * Math.PI / 180.0)) < 0.26)
+                Logger.Warn($"  Star{i + 1}: mount tilt={mountAltDeg:F1}° (near zenith singularity)");
         }
 
-        // Pairwise separation mismatch — diagnostic for step loss detection.
-        // Only check ACTIVE (non-excluded) star pairs to avoid false positives
-        // from stars that were already excluded for other reasons.
+        // Pairwise separation mismatch — diagnostic for step loss
         double maxPairSepError = 0;
         double maxStepLossPct = 0;
         for (int ai = 0; ai < bestActive.Count; ai++)
         {
             for (int aj = ai + 1; aj < bestActive.Count; aj++)
             {
-                int i = bestActive[ai];
-                int j = bestActive[aj];
-
-                double pairSkySep = Math.Acos(Math.Max(-1.0, Math.Min(1.0,
-                    allSkyVecs[i].x * allSkyVecs[j].x + allSkyVecs[i].y * allSkyVecs[j].y + allSkyVecs[i].z * allSkyVecs[j].z))) * 180.0 / Math.PI;
-                double pairMountSep = Math.Acos(Math.Max(-1.0, Math.Min(1.0,
-                    allMountVecs[i].x * allMountVecs[j].x + allMountVecs[i].y * allMountVecs[j].y + allMountVecs[i].z * allMountVecs[j].z))) * 180.0 / Math.PI;
+                int i = bestActive[ai], j = bestActive[aj];
+                double skyDot = allSkyVecs[i].x * allSkyVecs[j].x + allSkyVecs[i].y * allSkyVecs[j].y + allSkyVecs[i].z * allSkyVecs[j].z;
+                double mountDot = allMountVecs[i].x * allMountVecs[j].x + allMountVecs[i].y * allMountVecs[j].y + allMountVecs[i].z * allMountVecs[j].z;
+                double pairSkySep = Math.Acos(Math.Clamp(skyDot, -1.0, 1.0)) * 180.0 / Math.PI;
+                double pairMountSep = Math.Acos(Math.Clamp(mountDot, -1.0, 1.0)) * 180.0 / Math.PI;
                 double pairSepErr = Math.Abs(pairSkySep - pairMountSep);
                 double stepLoss = (pairSkySep > 0.5) ? (1.0 - pairMountSep / pairSkySep) * 100.0 : 0;
 
-                // Check if either star is near zenith (mount-alt near 90°)
-                double altI = _points[i].MountX / 3600.0;
-                double altJ = _points[j].MountX / 3600.0;
-                bool eitherNearZenith = Math.Abs(Math.Cos(altI * Math.PI / 180.0)) < 0.26 ||
-                                        Math.Abs(Math.Cos(altJ * Math.PI / 180.0)) < 0.26;
+                bool nearZenith = Math.Abs(Math.Cos(_points[i].MountX / 3600.0 * Math.PI / 180.0)) < 0.26 ||
+                                  Math.Abs(Math.Cos(_points[j].MountX / 3600.0 * Math.PI / 180.0)) < 0.26;
 
-                string diagTag;
-                if (eitherNearZenith && Math.Abs(stepLoss) > 5.0)
-                {
-                    diagTag = $" [ZENITH SINGULARITY — not step loss]";
-                }
-                else if (Math.Abs(stepLoss) > 1.0)
-                {
-                    diagTag = $", ~{Math.Abs(stepLoss):F1}% step loss";
-                }
-                else
-                {
-                    diagTag = "";
-                }
+                Logger.Debug($"  Pair star{i + 1}-star{j + 1}: sky={pairSkySep:F3}° mount={pairMountSep:F3}° Δ={pairSepErr:F3}°");
 
-                Logger.Notice($"  Pair star{i + 1}-star{j + 1}: sky={pairSkySep:F3}° mount={pairMountSep:F3}° (Δ={pairSepErr:F3}°{diagTag})");
-
-                // Only count as step loss if NOT near zenith
-                if (!eitherNearZenith)
+                if (!nearZenith)
                 {
                     if (pairSepErr > maxPairSepError) maxPairSepError = pairSepErr;
                     if (Math.Abs(stepLoss) > Math.Abs(maxStepLossPct)) maxStepLossPct = stepLoss;
@@ -730,8 +655,7 @@ public static partial class Calibration
                 : ComputePointResidual(_alignmentMatrix!, allSkyVecs[i], allMountVecs[i]);
 
             bool isRejected = rejected.Contains(i);
-            string tag = isRejected ? " [EXCLUDED]" : "";
-            Logger.Notice($"  Residual star{i + 1} (RA={_points[i].RA:F2}h Dec={_points[i].Dec:F1}°): {err * 60:F1}' ({err:F3}°){tag}");
+            Logger.Debug($"  Residual star{i + 1}: {err * 60:F1}' ({err:F3}°){(isRejected ? " [EXCLUDED]" : "")}");
 
             starResiduals.Add(new StarResidualInfo
             {
@@ -754,64 +678,27 @@ public static partial class Calibration
         double plateScale = PlateScale;
         double avgPixels = avgResidual * 3600.0 / plateScale;
 
-        Logger.Notice($"  Average residual: {avgResidual * 60:F1}' ({avgResidual:F3}°) ≈ {avgPixels:F0} pixels @ {PlateSolver.FocalLengthMm:F0}mm");
+        Logger.Notice($"  Average residual: {avgResidual * 60:F1}' ≈ {avgPixels:F0}px");
 
-        // Step loss warning — only meaningful when using a rotation matrix.
-        // Under affine alignment, pairwise separation differences are EXPECTED:
-        // the affine model captures axis scale errors / non-orthogonality,
-        // so what looks like "step loss" is actually the distortion being corrected.
         if (maxPairSepError > 0.3 && !_isAffineMatrix)
-        {
-            Logger.Warn($"  *** STEP LOSS DETECTED: worst active pair Δ={maxPairSepError:F2}° ({Math.Abs(maxStepLossPct):F1}% loss) ***");
-            Logger.Warn($"  *** Mount encoder positions don't match true star separations ***");
-            Logger.Warn($"  *** TIP: Use stars closer in AZIMUTH to reduce Z-axis slew distance ***");
-            Logger.Warn($"  *** TIP: Warm up the Z bearing by slewing back and forth before calibrating ***");
-        }
-        else if (maxPairSepError > 0.3 && _isAffineMatrix)
-        {
-            Logger.Notice($"  Pairwise separations differ by up to {maxPairSepError:F2}° ({Math.Abs(maxStepLossPct):F1}%) — captured by affine model");
-        }
+            Logger.Warn($"  Step loss detected: worst pair Δ={maxPairSepError:F2}° ({Math.Abs(maxStepLossPct):F1}%)");
 
-        // Quality assessment — avg residual is the SOLE quality gate.
-        // Pairwise separation is diagnostic-only (unreliable near zenith).
-        // Thresholds tuned for wide-field (~50mm) imaging with ~24 arcsec/pixel:
-        //   EXCELLENT < 0.5° (< 75px)  — excellent for framing/tracking
-        //   OK        < 1.5° (< 225px) — usable, may need refinement
-        //   MARGINAL  < 3.0° (< 450px) — poor but usable for GOTO
-        //   REJECTED  ≥ 3.0°           — alignment is broken
+        // Quality assessment (EXCELLENT < 0.5° < OK < 1.5° < MARGINAL < 3.0° < REJECTED)
         if (avgResidual > 3.0)
         {
-            Logger.Warn($"  *** ALIGNMENT REJECTED: pointing would be ≈{avgPixels:F0}+ pixels off ***");
-            if (anyNearZenith)
-                Logger.Warn($"  *** Likely cause: calibration stars too close to zenith (alt-az singularity) ***");
-            else if (maxPairSepError > 0.3)
-                Logger.Warn($"  *** Likely cause: step loss during slew ({Math.Abs(maxStepLossPct):F1}%) ***");
-            Logger.Warn($"  *** Please RESET and recalibrate with stars at 30°-70° altitude ***");
+            Logger.Warn($"  ALIGNMENT REJECTED (~{avgPixels:F0}px error). Recalibrate with stars at 30°-70° altitude.");
             _alignmentMatrix = null;
         }
         else if (avgResidual > 1.5)
-        {
-            Logger.Warn($"  Alignment MARGINAL: ~{avgPixels:F0}px pointing error");
-            if (anyNearZenith)
-                Logger.Warn($"  Stars are too close to zenith. Use stars at 30°-70° altitude.");
-            else
-                Logger.Warn($"  Consider resetting and recalibrating.");
-        }
+            Logger.Warn($"  Alignment MARGINAL: ~{avgPixels:F0}px error");
         else if (avgResidual > 0.5)
-        {
             Logger.Notice($"  Alignment quality: OK (~{avgPixels:F0}px error)");
-        }
         else
-        {
             Logger.Notice($"  Alignment quality: EXCELLENT (~{avgPixels:F0}px error)");
-        }
 
         if (_alignmentMatrix != null)
         {
-            Logger.Notice("Alignment matrix computed:");
-            Logger.Notice($"  [{_alignmentMatrix[0]:F4}, {_alignmentMatrix[1]:F4}, {_alignmentMatrix[2]:F4}]");
-            Logger.Notice($"  [{_alignmentMatrix[3]:F4}, {_alignmentMatrix[4]:F4}, {_alignmentMatrix[5]:F4}]");
-            Logger.Notice($"  [{_alignmentMatrix[6]:F4}, {_alignmentMatrix[7]:F4}, {_alignmentMatrix[8]:F4}]");
+            Logger.Debug($"  Matrix: [{_alignmentMatrix[0]:F4},{_alignmentMatrix[1]:F4},{_alignmentMatrix[2]:F4}] [{_alignmentMatrix[3]:F4},{_alignmentMatrix[4]:F4},{_alignmentMatrix[5]:F4}] [{_alignmentMatrix[6]:F4},{_alignmentMatrix[7]:F4},{_alignmentMatrix[8]:F4}]");
         }
 
         // Build alignment result for external consumers
@@ -907,48 +794,13 @@ public static partial class Calibration
     }
 
     /// <summary>
-    /// Convert mount encoder positions (arcseconds) to a unit vector.
-    /// Uses RAW encoder values — no offset correction.
-    /// Assumes: X=tilt (altitude), Z=pan (azimuth), Y=roll
-    /// </summary>
-    private static (double x, double y, double z) MountToUnitVector(int xArcsec, int yArcsec, int zArcsec)
-    {
-        // Convert arcseconds to radians
-        double alt = xArcsec * Math.PI / (180.0 * 3600.0);  // X = altitude
-        double az = zArcsec * Math.PI / (180.0 * 3600.0);   // Z = azimuth
-        // Y (roll) doesn't affect pointing direction, only image orientation
-
-        // Convert to unit vector
-        double x = Math.Cos(alt) * Math.Cos(az);
-        double y = Math.Cos(alt) * Math.Sin(az);
-        double z = Math.Sin(alt);
-
-        return (x, y, z);
-    }
-
-    /// <summary>
     /// Convert mount encoder positions to a unit vector with offset correction.
-    /// The offset maps raw encoder arcseconds to true alt/az, producing unit vectors
-    /// with correct angular distances. Used for alignment matrix fitting only —
-    /// the final matrix is compensated back to raw space for the Pico.
     /// </summary>
     private static (double x, double y, double z) MountToUnitVectorCorrected(int xArcsec, int yArcsec, int zArcsec)
     {
         double alt = (xArcsec + _mountXOffsetArcsec) * Math.PI / (180.0 * 3600.0);
         double az = (zArcsec + _mountZOffsetArcsec) * Math.PI / (180.0 * 3600.0);
         return (Math.Cos(alt) * Math.Cos(az), Math.Cos(alt) * Math.Sin(az), Math.Sin(alt));
-    }
-
-    /// <summary>
-    /// Multiply two 3×3 row-major matrices: R = A × B.
-    /// </summary>
-    private static float[] MultiplyMatrix3x3(float[] A, float[] B)
-    {
-        var R = new float[9];
-        for (int i = 0; i < 3; i++)
-            for (int j = 0; j < 3; j++)
-                R[i * 3 + j] = A[i * 3] * B[j] + A[i * 3 + 1] * B[3 + j] + A[i * 3 + 2] * B[6 + j];
-        return R;
     }
 
     #region Alt-Az / Sidereal Time Computation
@@ -1021,111 +873,6 @@ public static partial class Calibration
             az = 2 * Math.PI - az;
 
         return (alt * 180.0 / Math.PI, az * 180.0 / Math.PI);
-    }
-
-    public static async Task MoveMotorWithOvershootAsync(int moveX, int moveZ)
-    {
-        // Apply BACKLASH OVERSHOOT logic
-        // Always approach Z-axis (azimuth) from a positive direction to mechanically eat the slack
-        int finalMoveX = moveX;
-        int finalMoveZ = moveZ;
-        int overshootZ = 0;
-        
-        if (moveZ < 0) 
-        {
-            overshootZ = -30000; // ~8.3 degrees overshoot
-            finalMoveZ = moveZ + overshootZ;
-        }
-
-        // Resume motors and move
-        await UartClient.Client.ResumeMotors();
-        await UartClient.Client.MoveRelative(Axis.X, finalMoveX);
-        await UartClient.Client.MoveRelative(Axis.Z, finalMoveZ);
-        
-        // Correct the Z overshoot if we applied one
-        if (overshootZ != 0) 
-        {
-            // We MUST wait for the main move to finish before sending the correction move!
-            // Otherwise the firmware cancels finalMoveZ immediately and only does the backtrack.
-            Logger.Debug($"MoveMotorWithOvershootAsync: Waiting for main trajectory before applying {-overshootZ}\" correction...");
-            await Tracker.WaitUntilMotorsStopAsync(); // Accurate wait based on polling real encoder positions
-
-            await UartClient.Client.MoveRelative(Axis.Z, -overshootZ);
-        }
-    }
-
-    /// <summary>
-    /// After recording alignment star 1, compute and automatically slew to the approximate
-    /// mount position of alignment star 2. Uses alt-az computation to estimate the delta.
-    /// Picks the nearest alignment point as reference to minimize non-linear error.
-    /// Returns the actual arcsecond distances moved (for WaitForMoveComplete).
-    /// </summary>
-    public static async Task<(int moveX, int moveZ)> GotoApproximateAsync(float targetRA, float targetDec)
-    {
-        if (_points.Count < 1)
-        {
-            Logger.Warn("Need at least 1 alignment point before auto-goto.");
-            return (0, 0);
-        }
-
-        // Compute target alt-az NOW
-        var (alt2, az2) = ComputeAltAz(targetRA, targetDec, DateTime.UtcNow, Latitude, Longitude);
-
-        // Pick the nearest alignment point as reference (minimizes non-linear error)
-        AlignmentPoint star1 = _points[0];
-        double bestDist = double.MaxValue;
-        for (int i = 0; i < _points.Count; i++)
-        {
-            var p = _points[i];
-            var (pAlt, pAz) = ComputeAltAz(p.RA, p.Dec, p.TimeUtc, Latitude, Longitude);
-            double dAlt = alt2 - pAlt;
-            double dAz = az2 - pAz;
-            if (dAz > 180.0) dAz -= 360.0;
-            if (dAz < -180.0) dAz += 360.0;
-            double dist = dAlt * dAlt + dAz * dAz;
-            if (dist < bestDist)
-            {
-                bestDist = dist;
-                star1 = p;
-            }
-        }
-
-        // Compute alt-az of reference point at the time it was recorded
-        var (alt1, az1) = ComputeAltAz(star1.RA, star1.Dec, star1.TimeUtc, Latitude, Longitude);
-
-        // Compute delta in arcseconds from star1's known position
-        double deltaAltDeg = alt2 - alt1;
-        double deltaAzDeg = az2 - az1;
-
-        // Handle azimuth wrapping (-180 to +180)
-        if (deltaAzDeg > 180.0) deltaAzDeg -= 360.0;
-        if (deltaAzDeg < -180.0) deltaAzDeg += 360.0;
-
-        // Target motor position = star1's motor position + delta from star1
-        int targetMotorX = star1.MountX + (int)(deltaAltDeg * 3600.0);
-        int targetMotorZ = star1.MountZ + (int)(deltaAzDeg * 3600.0);
-
-        // Get current motor position and compute move from HERE
-        var currentPos = await Tracker.GetAxisPositions();
-        int moveX = targetMotorX - currentPos.XArcsecs;
-        int moveZ = targetMotorZ - currentPos.ZArcsecs;
-
-        Logger.Notice($"Auto-goto: star1 alt-az=({alt1:F2}°, {az1:F2}°), target alt-az=({alt2:F2}°, {az2:F2}°)");
-        Logger.Notice($"  Target motor=({targetMotorX}, {targetMotorZ}), current=({currentPos.XArcsecs}, {currentPos.ZArcsecs}), move=({moveX}, {moveZ})");
-
-        if (alt2 < 5.0)
-        {
-            Logger.Warn($"  Target is very low (alt={alt2:F1}°) — may not be visible.");
-        }
-        if (alt2 > 80.0)
-        {
-            Logger.Warn($"  Target is near zenith (alt={alt2:F1}°) — tracking accuracy will be limited.");
-        }
-
-        // Apply BACKLASH OVERSHOOT logic from previous iteration
-        await MoveMotorWithOvershootAsync(moveX, moveZ);
-
-        return (moveX, moveZ);
     }
 
     #endregion
@@ -1606,118 +1353,63 @@ public static partial class Calibration
         double predAz  = Math.Atan2(my, mx) * 180.0 / Math.PI;
         long predXArcsec = (long)(predAlt * 3600) - (long)_mountXOffsetArcsec;
         long predZArcsec = (long)(predAz  * 3600) - (long)_mountZOffsetArcsec;
-        Logger.Notice($"Predicted initial mount position: X={predXArcsec} arcsec ({predAlt:F2}°), Z={predZArcsec} arcsec ({predAz:F2}°)");
-        if (_isAffineMatrix)
-            Logger.Notice($"  (Using affine alignment — Pico MUST normalize mount vector)");
+        Logger.Notice($"Predicted initial position: X={predXArcsec}\" ({predAlt:F2}°), Z={predZArcsec}\" ({predAz:F2}°){(_isAffineMatrix ? " [affine]" : "")}");
         if (predAlt > 80.0)
-            Logger.Warn($"  *** Target is near ZENITH (alt={predAlt:F1}°) — tracking accuracy degrades significantly above 80°. Choose a lower target if possible. ***");
+            Logger.Warn($"  Target near zenith (alt={predAlt:F1}°) — accuracy degrades.");
 
-        // Extrapolation warning: estimate reliability based on calibration coverage
-        if (_activeIndices.Count >= 2 && _points.Count >= 2)
+        // Extrapolation warning
+        if (_activeIndices.Count >= 2)
         {
-            // Compute angular distance from target to each active calibration star
             double nearestDist = double.MaxValue;
             int nearestIdx = -1;
+            double maxBaseline = 0;
             for (int ai = 0; ai < _activeIndices.Count; ai++)
             {
                 int idx = _activeIndices[ai];
                 var calSky = CelestialToUnitVector(_points[idx].RA, _points[idx].Dec, refDateTime, _points[idx].TimeUtc);
                 double dot = targetSky.x * calSky.x + targetSky.y * calSky.y + targetSky.z * calSky.z;
-                double dist = Math.Acos(Math.Max(-1.0, Math.Min(1.0, dot))) * 180.0 / Math.PI;
-                if (dist < nearestDist)
-                {
-                    nearestDist = dist;
-                    nearestIdx = idx;
-                }
-            }
+                double dist = Math.Acos(Math.Clamp(dot, -1.0, 1.0)) * 180.0 / Math.PI;
+                if (dist < nearestDist) { nearestDist = dist; nearestIdx = idx; }
 
-            // Compute calibration baseline (max separation among active stars)
-            double maxBaseline = 0;
-            for (int ai = 0; ai < _activeIndices.Count; ai++)
-            {
                 for (int aj = ai + 1; aj < _activeIndices.Count; aj++)
                 {
-                    int ii = _activeIndices[ai], jj = _activeIndices[aj];
-                    var si = CelestialToUnitVector(_points[ii].RA, _points[ii].Dec, refDateTime, _points[ii].TimeUtc);
+                    int jj = _activeIndices[aj];
                     var sj = CelestialToUnitVector(_points[jj].RA, _points[jj].Dec, refDateTime, _points[jj].TimeUtc);
-                    double d = Math.Acos(Math.Max(-1.0, Math.Min(1.0,
-                        si.x * sj.x + si.y * sj.y + si.z * sj.z))) * 180.0 / Math.PI;
+                    double d = Math.Acos(Math.Clamp(calSky.x*sj.x + calSky.y*sj.y + calSky.z*sj.z, -1.0, 1.0)) * 180.0 / Math.PI;
                     if (d > maxBaseline) maxBaseline = d;
                 }
             }
 
             double extrapRatio = (maxBaseline > 1.0) ? nearestDist / (maxBaseline * 0.5) : nearestDist;
-            Logger.Notice($"  Target is {nearestDist:F1}° from nearest calibration star (star{nearestIdx + 1}), baseline={maxBaseline:F1}°, extrapolation={extrapRatio:F1}×");
+            Logger.Debug($"  Nearest cal star: star{nearestIdx + 1} @{nearestDist:F1}°, baseline={maxBaseline:F1}°, extrap={extrapRatio:F1}×");
 
             if (extrapRatio > 3.0)
-            {
-                Logger.Warn($"  *** EXTREME EXTRAPOLATION ({extrapRatio:F1}×) — expect LARGE pointing error ***");
-                Logger.Warn($"  *** Add calibration stars near the target region, or use 3+ stars for affine alignment ***");
-            }
+                Logger.Warn($"  Extreme extrapolation ({extrapRatio:F1}×) — add calibration stars near target");
             else if (extrapRatio > 1.5)
-            {
-                Logger.Warn($"  *** EXTRAPOLATION WARNING ({extrapRatio:F1}×) — pointing accuracy degrades outside calibration zone ***");
-                Logger.Warn($"  *** TIP: Calibrate with 3+ stars spread across the sky for best results ***");
-            }
-            else if (extrapRatio > 1.0)
-            {
-                Logger.Notice($"  Target is slightly outside calibration zone — accuracy may be reduced");
-            }
-
-            // Estimate model residual at the tracked target by checking nearest calibration star's residual
-            if (nearestIdx >= 0)
-            {
-                double PLATE_SCALE = PlateScale;
-                var calSky = CelestialToUnitVector(_points[nearestIdx].RA, _points[nearestIdx].Dec, refDateTime, _points[nearestIdx].TimeUtc);
-                var calMount = MountToUnitVectorCorrected(_points[nearestIdx].MountX, _points[nearestIdx].MountY, _points[nearestIdx].MountZ);
-                double calResidual = _isAffineMatrix
-                    ? ComputePointResidualAffine(_alignmentMatrix!, calSky, calMount)
-                    : ComputePointResidual(_alignmentMatrix!, calSky, calMount);
-                double calResidPx = calResidual * 3600.0 / PLATE_SCALE;
-                if (calResidPx > 3.0)
-                {
-                    Logger.Notice($"  Nearest calibration star (star{nearestIdx + 1}) has {calResidual * 60:F1}' ({calResidPx:F0}px) model residual");
-                    Logger.Notice($"  This is the expected centering accuracy — NOT a tracking rate error");
-                }
-            }
+                Logger.Warn($"  Extrapolation warning ({extrapRatio:F1}×) — outside calibration zone");
         }
 
-        // ============================================================
-        // Local affine optimization: when the global affine has non-zero
-        // residuals (non-linear mount distortion), compute a locally-
-        // optimized affine matrix using the 3 nearest calibration stars.
-        // The global matrix is the best linear fit across ALL stars, but
-        // with ~20% distortion the mapping is non-linear — a local fit
-        // through 3 nearby stars interpolates much more accurately.
-        // ============================================================
+        // Local affine optimization: use 3 nearest stars for better local accuracy
         float[] trackingMatrix = _alignmentMatrix!;
 
         if (_isAffineMatrix && _activeIndices.Count >= 4)
         {
-            double LOCAL_PLATE_SCALE = PlateScale;
-
-            // Compute distance from target to each active calibration star
             var starDistances = new List<(int idx, double dist)>();
             for (int ai = 0; ai < _activeIndices.Count; ai++)
             {
                 int idx = _activeIndices[ai];
                 var calSky = CelestialToUnitVector(_points[idx].RA, _points[idx].Dec, refDateTime, _points[idx].TimeUtc);
                 double dot = targetSky.x * calSky.x + targetSky.y * calSky.y + targetSky.z * calSky.z;
-                double dist = Math.Acos(Math.Max(-1.0, Math.Min(1.0, dot))) * 180.0 / Math.PI;
+                double dist = Math.Acos(Math.Clamp(dot, -1.0, 1.0)) * 180.0 / Math.PI;
                 starDistances.Add((idx, dist));
             }
             starDistances.Sort((a, b) => a.dist.CompareTo(b.dist));
 
-            // Select 3 nearest stars for local affine (exact solve → 0 residuals at those 3)
-            int localCount = 3;
-            var localSky = new (double x, double y, double z)[localCount];
-            var localMount = new (double x, double y, double z)[localCount];
-            var localIndices = new int[localCount];
-
-            for (int i = 0; i < localCount; i++)
+            var localSky = new (double x, double y, double z)[3];
+            var localMount = new (double x, double y, double z)[3];
+            for (int i = 0; i < 3; i++)
             {
                 int idx = starDistances[i].idx;
-                localIndices[i] = idx;
                 localSky[i] = CelestialToUnitVector(_points[idx].RA, _points[idx].Dec, refDateTime, _points[idx].TimeUtc);
                 localMount[i] = MountToUnitVectorCorrected(_points[idx].MountX, _points[idx].MountY, _points[idx].MountZ);
             }
@@ -1725,32 +1417,8 @@ public static partial class Calibration
             float[]? localMatrix = ComputeAffineMatrix(localSky, localMount);
             if (localMatrix != null)
             {
-                // Compare global vs local residuals at the 3 nearest stars
-                double globalResidSum = 0;
-                for (int i = 0; i < localCount; i++)
-                    globalResidSum += ComputePointResidualAffine(_alignmentMatrix!, localSky[i], localMount[i]);
-                double globalAvgNear = globalResidSum / localCount;
-                double globalAvgPx = globalAvgNear * 3600.0 / LOCAL_PLATE_SCALE;
-
-                // Compute position shift between global and local prediction
-                double lmx = localMatrix[0]*targetSky.x + localMatrix[1]*targetSky.y + localMatrix[2]*targetSky.z;
-                double lmy = localMatrix[3]*targetSky.x + localMatrix[4]*targetSky.y + localMatrix[5]*targetSky.z;
-                double lmz = localMatrix[6]*targetSky.x + localMatrix[7]*targetSky.y + localMatrix[8]*targetSky.z;
-                double lnorm = Math.Sqrt(lmx*lmx + lmy*lmy + lmz*lmz);
-                if (lnorm > 1e-10) { lmx /= lnorm; lmy /= lnorm; lmz /= lnorm; }
-                // Angular shift between global and local predictions
-                double shiftDot = mx*lmx + my*lmy + mz*lmz;
-                double shiftDeg = Math.Acos(Math.Max(-1.0, Math.Min(1.0, shiftDot))) * 180.0 / Math.PI;
-                double shiftPx = shiftDeg * 3600.0 / LOCAL_PLATE_SCALE;
-
-                Logger.Notice($"  Local affine from 3 nearest stars (star{localIndices[0]+1} @{starDistances[0].dist:F0}°, " +
-                              $"star{localIndices[1]+1} @{starDistances[1].dist:F0}°, star{localIndices[2]+1} @{starDistances[2].dist:F0}°):");
-                Logger.Notice($"    Global matrix residual at 3 nearest: {globalAvgNear * 60:F1}' ({globalAvgPx:F0}px)");
-                Logger.Notice($"    Local matrix residual at 3 nearest: 0.0' (exact fit)");
-                Logger.Notice($"    Predicted position shift: {shiftDeg * 60:F1}' ({shiftPx:F0}px) vs global matrix");
-
                 trackingMatrix = localMatrix;
-                Logger.Notice($"  *** Using LOCAL affine for tracking — handles non-linear mount distortion ***");
+                Logger.Notice($"  Using local affine from 3 nearest stars");
             }
         }
 

@@ -1,24 +1,16 @@
 using System;
 using System.Diagnostics;
-using System.Globalization;
 using System.IO;
-using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 
-
 public static class ImageProcessing
 {
-
-        /// <summary>
+    /// <summary>
     /// Fraction of each image dimension to keep from the center before solving.
     /// 0.5 = keep center 50%×50% (25% of pixels) — removes distorted/vignetted borders.
-    /// Set to 1.0 to disable cropping.
-    /// Example: 24 MP full-frame → center-crop at 0.5 → 6 MP centre-only image.
     /// </summary>
     private static double CropFraction { get; set; } = 0.5;
-    
-    
 
     /// <summary>
     /// Crop an image to the centre <see cref="CropFraction"/> of each dimension using

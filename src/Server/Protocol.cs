@@ -274,7 +274,7 @@ public record AutoCenterPayload(
 public record AutoCalibratePayload(
     [property: JsonPropertyName("altSteps")] int AltSteps = 4,
     [property: JsonPropertyName("azSteps")] int AzSteps = 5,
-    [property: JsonPropertyName("wideSweep")] bool WideSweep = true // Added WideSweep option
+    [property: JsonPropertyName("wideSweep")] bool WideSweep = true
 );
 
 public record GuidedTrackingPayload(
