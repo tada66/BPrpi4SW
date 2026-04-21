@@ -106,7 +106,11 @@ public sealed class UartClient : IDisposable
     private static string? FindSerialPort()
     {
         // Common Linux serial ports
-        string[] potentialPorts = { "/dev/ttyS0", "/dev/serial0", "/dev/ttyAMA0", "/dev/ttyUSB0" };
+        string? overridePort = Environment.GetEnvironmentVariable("BPRPI4SW_UART_PORT");
+        if (!string.IsNullOrWhiteSpace(overridePort) && System.IO.File.Exists(overridePort))
+            return overridePort;
+
+        string[] potentialPorts = { "/dev/serial0", "/dev/ttyAMA0", "/dev/ttyS0", "/dev/ttyUSB0" };
         foreach (var port in potentialPorts)
         {
             if (System.IO.File.Exists(port))

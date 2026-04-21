@@ -1,5 +1,5 @@
 param(
-  [string]$RemoteHost = "10.0.0.45",
+  [string]$RemoteHost = "10.0.0.142",
   [string]$User = "tada66",
   [string]$Arch,                # auto-detect if omitted
   [string]$IdentityFile = "$env:USERPROFILE\.ssh\id_ed25519",  # path to private key
@@ -66,8 +66,10 @@ Invoke-Expression "$sshBase $User@${RemoteHost} 'chmod +x ~/BPrpi4SW/BPrpi4SW'"
 Write-Host "Copying boot scripts..."
 Invoke-Expression "$scpBase tools/lcd_boot.py $User@${RemoteHost}:/home/$User/BPrpi4SW/lcd_boot.py"
 Invoke-Expression "$scpBase scripts/install-service.sh $User@${RemoteHost}:/home/$User/BPrpi4SW/install-service.sh"
+Invoke-Expression "$scpBase scripts/install-gphoto2.sh $User@${RemoteHost}:/home/$User/BPrpi4SW/install-gphoto2.sh"
+Invoke-Expression "$scpBase scripts/install-uart.sh $User@${RemoteHost}:/home/$User/BPrpi4SW/install-uart.sh"
 Invoke-Expression "$scpBase scripts/setup-solver.sh $User@${RemoteHost}:/home/$User/BPrpi4SW/setup-solver.sh"
-Invoke-Expression "$sshBase $User@${RemoteHost} 'chmod +x ~/BPrpi4SW/lcd_boot.py ~/BPrpi4SW/install-service.sh ~/BPrpi4SW/setup-solver.sh'"
+Invoke-Expression "$sshBase $User@${RemoteHost} 'chmod +x ~/BPrpi4SW/lcd_boot.py ~/BPrpi4SW/install-service.sh ~/BPrpi4SW/setup-solver.sh ~/BPrpi4SW/install-gphoto2.sh ~/BPrpi4SW/install-uart.sh'"
 
 if ($InstallService) {
   Write-Host "Installing systemd service (requires sudo)..."
