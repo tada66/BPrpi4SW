@@ -1,4 +1,7 @@
-﻿class Program
+﻿// Author: Tadeáš Horák - xhorakt00
+// Bachelor's thesis: Motorized star tracker
+
+class Program
 {
     // Server ports
     private const int WS_PORT = 4400;
@@ -37,7 +40,6 @@
 
         Logger.Info("UART Client started. LCD listening.");
         Logger.Notice("Please note that the original position of the device (0,0,0) is not necessarily the 'home' position. It is simply the position at which the device was powered on. The device must be calibrated to know it's actual position.");
-        Logger.Notice("Also note that in case motors are disabled (not paused, but disabled), any calibration is LOST! Reported position will not match any previous readings and device must be recalibrated.");
 
         // ── Start device control server ──
         StartServer(lcd, ip);
@@ -91,7 +93,7 @@
             Logger.Info($"  WebSocket : ws://{ip}:{WS_PORT}");
             Logger.Info($"  UDP LV    : {ip}:{UDP_PORT}");
             Logger.Info($"  HTTP Files: http://{ip}:{HTTP_PORT}/captures/");
-            Logger.Info($"  mDNS      : _bpcontrol._tcp.local");
+            Logger.Info($"  mDNS      : _startracker._tcp.local");
             if (ip == HotspotManager.HotspotIp)
                 Logger.Info($"  Hotspot   : SSID={HotspotManager.HotspotSsid} PW={HotspotManager.HotspotPassword}");
         }

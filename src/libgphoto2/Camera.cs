@@ -1,3 +1,6 @@
+// Author: Tadeáš Horák - xhorakt00
+// Bachelor's thesis: Motorized star tracker
+
 public class Camera
 {
     private readonly libgphoto2Driver _driver = new();

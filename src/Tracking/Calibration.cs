@@ -1,3 +1,6 @@
+// Author: Tadeáš Horák - xhorakt00
+// Bachelor's thesis: Motorized star tracker
+
 /// <summary>
 /// Star alignment system for alt-az mount celestial tracking.
 /// Computes a 3x3 transformation matrix that maps sky coordinates to mount coordinates.

@@ -1,3 +1,6 @@
+// Author: Tadeáš Horák - xhorakt00
+// Bachelor's thesis: Motorized star tracker
+
 using System.Diagnostics;
 
 internal class ExternalProcess

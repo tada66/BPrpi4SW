@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# Author: Tadeáš Horák - xhorakt00
+# Bachelor's thesis: Motorized star tracker
+
 import argparse
 import re
 import sys

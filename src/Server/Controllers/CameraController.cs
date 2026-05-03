@@ -1,3 +1,6 @@
+// Author: Tadeáš Horák - xhorakt00
+// Bachelor's thesis: Motorized star tracker
+
 /// <summary>
 /// Handles camera-related WebSocket commands by wrapping the Camera class.
 /// </summary>

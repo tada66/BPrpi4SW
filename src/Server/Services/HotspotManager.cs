@@ -1,3 +1,6 @@
+// Author: Tadeáš Horák - xhorakt00
+// Bachelor's thesis: Motorized star tracker
+
 using System.Diagnostics;
 using System.Net.NetworkInformation;
 using System.Net.Sockets;

@@ -1,3 +1,6 @@
+// Author: Tadeáš Horák - xhorakt00
+// Bachelor's thesis: Motorized star tracker
+
 using System.Runtime.InteropServices;
 
 public record AvailableCamera(string Model, string Port);

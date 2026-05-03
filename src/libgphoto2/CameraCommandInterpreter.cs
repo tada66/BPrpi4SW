@@ -1,3 +1,6 @@
+// Author: Tadeáš Horák - xhorakt00
+// Bachelor's thesis: Motorized star tracker
+
 internal class CameraCommandInterpreter
 {
     private readonly libgphoto2Driver _driver;

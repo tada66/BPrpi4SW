@@ -1,3 +1,6 @@
+# Author: Tadeáš Horák - xhorakt00
+# Bachelor's thesis: Motorized star tracker
+
 import socket
 import struct
 import cv2

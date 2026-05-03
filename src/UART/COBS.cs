@@ -1,3 +1,6 @@
+// Author: Tadeáš Horák - xhorakt00
+// Bachelor's thesis: Motorized star tracker
+
 internal static class Cobs
 {
     internal static byte[] Encode(byte[] data)

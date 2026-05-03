@@ -1,3 +1,6 @@
+// Author: Tadeáš Horák - xhorakt00
+// Bachelor's thesis: Motorized star tracker
+
 /// <summary>
 /// Periodically broadcasts camera status over WebSocket.
 /// Mount status is already event-driven (forwarded by MountController from EVT_STATUS),
