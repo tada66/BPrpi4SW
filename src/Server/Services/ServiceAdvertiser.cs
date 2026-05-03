@@ -1,3 +1,6 @@
+// Author: Tadeáš Horák - xhorakt00
+// Bachelor's thesis: Motorized star tracker
+
 using System.Net;
 using System.Net.NetworkInformation;
 using System.Net.Sockets;
@@ -5,14 +8,14 @@ using System.Text;
 
 /// <summary>
 /// Advertises the device control service via mDNS (multicast DNS / Bonjour / Avahi).
-/// Broadcasts a _bpcontrol._tcp.local service with TXT records containing port info.
+/// Broadcasts a _startracker._tcp.local service with TXT records containing port info.
 /// 
 /// This is a minimal self-contained mDNS responder — no external NuGet dependency required.
 /// It responds to queries for the service and periodically announces its presence.
 /// </summary>
 public class ServiceAdvertiser : IDisposable
 {
-    private const string SERVICE_TYPE = "_bpcontrol._tcp.local";
+    private const string SERVICE_TYPE = "_startracker._tcp.local";
     private const int MDNS_PORT = 5353;
     private static readonly IPAddress MdnsMulticastAddress = IPAddress.Parse("224.0.0.251");
     private static readonly IPEndPoint MdnsEndpoint = new(MdnsMulticastAddress, MDNS_PORT);
