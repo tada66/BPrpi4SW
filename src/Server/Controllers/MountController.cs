@@ -1,7 +1,3 @@
-using System;
-using System.Threading;
-using System.Threading.Tasks;
-
 /// <summary>
 /// Handles mount-related WebSocket commands by wrapping UartClient and Calibration.
 /// Subscribes to UART events and forwards them as WebSocket events.

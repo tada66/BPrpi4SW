@@ -1,10 +1,5 @@
-using System;
 using System.IO.Ports;
-using System.Threading;
 using System.Collections.Concurrent;
-using System.Collections.Generic;
-using System.Threading.Tasks;
-using System.Drawing.Text;
 
 // This class made as a singleton according guide found here: https://csharpindepth.com/Articles/Singleton
 

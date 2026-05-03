@@ -1,0 +1,7 @@
+<Project>
+  <!-- CI: run dotnet format analyzers on BPrpi4SW.sln for IDE0005 with verify-no-changes. -->
+  <PropertyGroup>
+    <AnalysisLevel>latest</AnalysisLevel>
+    <EnforceCodeStyleInBuild>true</EnforceCodeStyleInBuild>
+  </PropertyGroup>
+</Project>

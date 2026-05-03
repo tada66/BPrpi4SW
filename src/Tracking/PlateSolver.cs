@@ -1,10 +1,6 @@
-using System;
 using System.Diagnostics;
 using System.Globalization;
-using System.IO;
 using System.Text.RegularExpressions;
-using System.Threading;
-using System.Threading.Tasks;
 
 /// <summary>
 /// Wraps the astrometry.net solve-field command to plate-solve captured images.

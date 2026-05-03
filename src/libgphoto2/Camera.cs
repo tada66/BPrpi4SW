@@ -1,8 +1,3 @@
-using System;
-using System.Runtime.InteropServices;
-using System.Collections.Generic;
-using Microsoft.Extensions.Logging.Abstractions;
-
 public class Camera
 {
     private readonly libgphoto2Driver _driver = new();

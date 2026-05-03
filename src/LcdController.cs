@@ -1,6 +1,4 @@
-using System;
 using System.Device.Gpio;
-using System.Threading;
 using Iot.Device.CharacterLcd;
 
 /// <summary>

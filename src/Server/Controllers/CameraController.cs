@@ -1,10 +1,3 @@
-using System;
-using System.Collections.Generic;
-using System.IO;
-using System.Linq;
-using System.Net;
-using System.Threading.Tasks;
-
 /// <summary>
 /// Handles camera-related WebSocket commands by wrapping the Camera class.
 /// </summary>

@@ -1,8 +1,4 @@
-using System;
-using System.Linq;
 using System.Runtime.InteropServices;
-using System.Collections.Generic;
-using System.Reflection.Metadata.Ecma335;
 
 public record AvailableCamera(string Model, string Port);
 

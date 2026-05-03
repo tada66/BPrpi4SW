@@ -1,7 +1,5 @@
-using System;
 using System.Net;
 using System.Net.Sockets;
-using System.Threading;
 
 /// <summary>
 /// Sends live view JPEG frames over UDP to the connected client.

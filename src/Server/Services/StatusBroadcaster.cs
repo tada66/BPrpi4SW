@@ -1,7 +1,3 @@
-using System;
-using System.Threading;
-using System.Threading.Tasks;
-
 /// <summary>
 /// Periodically broadcasts camera status over WebSocket.
 /// Mount status is already event-driven (forwarded by MountController from EVT_STATUS),

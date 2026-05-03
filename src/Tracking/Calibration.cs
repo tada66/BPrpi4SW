@@ -1,7 +1,3 @@
-using System;
-using System.Collections.Generic;
-using System.Threading.Tasks;
-
 /// <summary>
 /// Star alignment system for alt-az mount celestial tracking.
 /// Computes a 3x3 transformation matrix that maps sky coordinates to mount coordinates.

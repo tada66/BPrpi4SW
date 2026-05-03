@@ -1,11 +1,4 @@
-﻿using System;
-using System.Linq;
-using System.Net;
-using System.Net.Sockets;
-using System.Threading.Tasks;
-using Iot.Device.CharacterLcd;
-
-class Program
+﻿class Program
 {
     // Server ports
     private const int WS_PORT = 4400;

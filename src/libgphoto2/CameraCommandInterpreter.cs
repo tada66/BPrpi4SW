@@ -1,9 +1,3 @@
-using System;
-using System.Collections.Generic;
-using System.IO;
-using System.Linq;
-using System.Threading;
-
 internal class CameraCommandInterpreter
 {
     private readonly libgphoto2Driver _driver;
