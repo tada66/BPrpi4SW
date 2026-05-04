@@ -1,6 +1,5 @@
-using System;
-using System.Threading;
-using System.Threading.Tasks;
+// Author: Tadeáš Horák - xhorakt00
+// Bachelor's thesis: Motorized star tracker
 
 /// <summary>
 /// Handles mount-related WebSocket commands by wrapping UartClient and Calibration.

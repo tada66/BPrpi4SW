@@ -1,6 +1,5 @@
-using System;
-using System.Collections.Generic;
-using System.Threading.Tasks;
+// Author: Tadeáš Horák - xhorakt00
+// Bachelor's thesis: Motorized star tracker
 
 /// <summary>
 /// Star alignment system for alt-az mount celestial tracking.

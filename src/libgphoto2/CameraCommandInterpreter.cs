@@ -1,8 +1,5 @@
-using System;
-using System.Collections.Generic;
-using System.IO;
-using System.Linq;
-using System.Threading;
+// Author: Tadeáš Horák - xhorakt00
+// Bachelor's thesis: Motorized star tracker
 
 internal class CameraCommandInterpreter
 {

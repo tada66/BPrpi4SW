@@ -1,7 +1,5 @@
-using System;
-using System.Runtime.InteropServices;
-using System.Collections.Generic;
-using Microsoft.Extensions.Logging.Abstractions;
+// Author: Tadeáš Horák - xhorakt00
+// Bachelor's thesis: Motorized star tracker
 
 public class Camera
 {

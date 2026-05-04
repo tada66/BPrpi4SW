@@ -1,11 +1,8 @@
-using System;
-using System.Collections.Generic;
-using System.IO;
-using System.Linq;
+// Author: Tadeáš Horák - xhorakt00
+// Bachelor's thesis: Motorized star tracker
+
 using System.Net;
 using System.Text;
-using System.Threading;
-using System.Threading.Tasks;
 using MetadataExtractor;
 using Directory = System.IO.Directory;
 

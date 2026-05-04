@@ -1,11 +1,9 @@
-using System;
+// Author: Tadeáš Horák - xhorakt00
+// Bachelor's thesis: Motorized star tracker
+
 using System.Diagnostics;
-using System.IO;
-using System.Linq;
-using System.Net;
 using System.Net.NetworkInformation;
 using System.Net.Sockets;
-using System.Threading.Tasks;
 
 /// <summary>
 /// Checks for a real network connection (WiFi/Ethernet with routable IPv4).
@@ -13,17 +11,17 @@ using System.Threading.Tasks;
 /// clients can always reach the device.
 ///
 /// Hotspot defaults:
-///   SSID     : BPControl
-///   Password : bpcontrol1
+///   SSID     : StarTracker
+///   Password : startracker1
 ///   IP       : 192.168.4.1  (NM assigns this automatically for shared connections)
 ///   Interface: wlan0
 /// </summary>
 public static class HotspotManager
 {
-    public const string HotspotSsid         = "BPControl";
-    public const string HotspotPassword     = "bpcontrol1";
+    public const string HotspotSsid         = "StarTracker";
+    public const string HotspotPassword     = "startracker1";
     private const string HotspotInterface    = "wlan0";
-    private const string HotspotConnectionName = "bp-hotspot";
+    private const string HotspotConnectionName = "startracker-hotspot";
 
     // IP that NetworkManager assigns to the hotspot interface (NM default for shared mode)
     public const string HotspotIp = "10.42.0.1";

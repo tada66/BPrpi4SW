@@ -1,5 +1,6 @@
-using System;
-using System.IO;
+// Author: Tadeáš Horák - xhorakt00
+// Bachelor's thesis: Motorized star tracker
+
 using System.Runtime.CompilerServices;
 
 internal enum LogLevel

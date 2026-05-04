@@ -1,4 +1,6 @@
-using System;
+// Author: Tadeáš Horák - xhorakt00
+// Bachelor's thesis: Motorized star tracker
+
 using System.Text.Json;
 using System.Text.Json.Serialization;
 

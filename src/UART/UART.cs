@@ -1,10 +1,8 @@
-using System;
+// Author: Tadeáš Horák - xhorakt00
+// Bachelor's thesis: Motorized star tracker
+
 using System.IO.Ports;
-using System.Threading;
 using System.Collections.Concurrent;
-using System.Collections.Generic;
-using System.Threading.Tasks;
-using System.Drawing.Text;
 
 // This class made as a singleton according guide found here: https://csharpindepth.com/Articles/Singleton
 
@@ -503,17 +501,16 @@ public sealed class UartClient : IDisposable
     /// <param name="targetDec">Declination in degrees (-90 to +90)</param>
     /// <param name="alignMatrix">3x3 alignment matrix (9 floats, row-major) — may be rotation or affine</param>
     /// <param name="refTime">Unix timestamp (UTC) when tracking starts</param>
-    /// <param name="latitude">Observer latitude in degrees</param>
     /// <param name="mountOffsetX">X-axis (altitude) motor offset in arcseconds: trueAlt_arcsec - motorX_arcsec</param>
     /// <param name="mountOffsetZ">Z-axis (azimuth)  motor offset in arcseconds: trueAz_arcsec  - motorZ_arcsec</param>
-    public Task<bool> StartCelestialTracking(float targetRA, float targetDec, float[] alignMatrix, long refTime, float latitude, int mountOffsetX, int mountOffsetZ)
+    public Task<bool> StartCelestialTracking(float targetRA, float targetDec, float[] alignMatrix, long refTime, int mountOffsetX, int mountOffsetZ)
     {
         if (alignMatrix.Length != 9)
             throw new ArgumentException("alignMatrix must have exactly 9 elements (3x3)", nameof(alignMatrix));
 
         Logger.Notice($"Starting celestial tracking: RA={targetRA:F4}h, Dec={targetDec:F4}°, refTime={refTime}, offsets=({mountOffsetX},{mountOffsetZ})");
 
-        // Payload: RA(4) + Dec(4) + matrix(36) + refTime(8) + latitude(4) + offsetX(4) + offsetZ(4) = 64 bytes
+        // Payload: RA(4) + Dec(4) + matrix(36) + refTime(8) + offsetX(4) + offsetZ(4) = 60 bytes
         var data = new byte[64];
         int offset = 0;
 
@@ -535,10 +532,6 @@ public sealed class UartClient : IDisposable
         // refTime (uint64, 8 bytes)
         Array.Copy(BitConverter.GetBytes((ulong)refTime), 0, data, offset, 8);
         offset += 8;
-
-        // latitude (float, 4 bytes)
-        Array.Copy(BitConverter.GetBytes(latitude), 0, data, offset, 4);
-        offset += 4;
 
         // mountOffsetX (int32, 4 bytes)
         Array.Copy(BitConverter.GetBytes(mountOffsetX), 0, data, offset, 4);

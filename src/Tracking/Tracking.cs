@@ -1,3 +1,6 @@
+// Author: Tadeáš Horák - xhorakt00
+// Bachelor's thesis: Motorized star tracker
+
 internal static class Tracker
 {
     internal class AxisPositions

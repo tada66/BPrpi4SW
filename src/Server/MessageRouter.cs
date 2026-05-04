@@ -1,5 +1,5 @@
-using System;
-using System.Threading.Tasks;
+// Author: Tadeáš Horák - xhorakt00
+// Bachelor's thesis: Motorized star tracker
 
 /// <summary>
 /// Routes incoming WebSocket messages to the appropriate controller based on topic and action.

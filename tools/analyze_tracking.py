@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# Author: Tadeáš Horák - xhorakt00
+# Bachelor's thesis: Motorized star tracker
+
 """Analyze celestial tracking positions from log data to find drift/jitter."""
 import re
 import sys

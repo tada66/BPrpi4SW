@@ -1,4 +1,6 @@
-using System;
+// Author: Tadeáš Horák - xhorakt00
+// Bachelor's thesis: Motorized star tracker
+
 using System.Device.Gpio;
 using System.Device.Spi;
 using System.IO;

@@ -1,6 +1,5 @@
-using System;
-using System.Threading;
-using System.Threading.Tasks;
+// Author: Tadeáš Horák - xhorakt00
+// Bachelor's thesis: Motorized star tracker
 
 /// <summary>
 /// Periodically broadcasts camera status over WebSocket.
