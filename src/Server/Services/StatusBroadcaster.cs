@@ -11,6 +11,7 @@ public class StatusBroadcaster : IDisposable
     private readonly WebSocketServer _wsServer;
     private readonly CameraController _cameraController;
     private Timer? _timer;
+    public event Action<CameraStatusPayload>? CameraStatusUpdated;
 
     /// <summary>
     /// Broadcast interval in milliseconds.
@@ -36,14 +37,15 @@ public class StatusBroadcaster : IDisposable
 
     private void OnTick(object? state)
     {
-        if (!_wsServer.HasClient) return;
-
         try
         {
             var status = _cameraController.GetStatusPayload();
             if (status != null)
             {
-                _ = _wsServer.SendMessageAsync(Message.Event("camera.status", status));
+                CameraStatusUpdated?.Invoke(status);
+
+                if (_wsServer.HasClient)
+                    _ = _wsServer.SendMessageAsync(Message.Event("camera.status", status));
             }
         }
         catch (Exception ex)

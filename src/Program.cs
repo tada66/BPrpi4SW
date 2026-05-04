@@ -83,6 +83,7 @@ class Program
 
             // 6. Status broadcaster (periodic camera status over WebSocket)
             var statusBroadcaster = new StatusBroadcaster(wsServer, cameraController);
+            statusBroadcaster.CameraStatusUpdated += lcd.UpdateCameraStatus;
             statusBroadcaster.Start();
 
             // 7. mDNS service advertisement

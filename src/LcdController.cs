@@ -28,14 +28,16 @@ public sealed class LcdController : IDisposable
     private const int DisplayHeight = 320;
 
     private readonly object _stateLock = new();
+    private readonly object _displayLock = new();
     private readonly Hx8357Display _display;
     private readonly Timer _refreshTimer;
+    private int _refreshInProgress;
     private bool _diagnosticMode = false;
 
-    private readonly SixLaborsFont _fontXl;
-    private readonly SixLaborsFont _fontLarge;
     private readonly SixLaborsFont _fontMed;
     private readonly SixLaborsFont _fontSmall;
+    private readonly SixLaborsFont _fontTarget;
+    private readonly SixLaborsFont _fontMountAxis;
 
     private string _connectionType = "Network";
     private string _ipAddress = "0.0.0.0";
@@ -45,13 +47,19 @@ public sealed class LcdController : IDisposable
     private float _tempC;
     private bool _motorsEnabled;
     private bool _motorsPaused;
+    private bool _cameraConnected;
+    private string _cameraModel = "N/A";
+    private string _cameraBattery = "--";
+    private string _cameraIso = "--";
+    private string _cameraAperture = "--";
+    private string _cameraShutter = "--";
 
     public LcdController()
     {
-        _fontXl = LoadFont(50);
-        _fontLarge = LoadFont(35);
         _fontMed = LoadFont(22);
         _fontSmall = LoadFont(18);
+        _fontTarget = LoadFont(34);
+        _fontMountAxis = LoadFont(17);
 
         _display = new Hx8357Display(DisplayWidth, DisplayHeight);
         try
@@ -65,7 +73,8 @@ public sealed class LcdController : IDisposable
             throw;
         }
 
-        _refreshTimer = new Timer(OnRefreshTick, null, 500, 250);  // Start after 500ms, then every 250ms
+        // Keep refresh period comfortably above worst-case render+SPI transfer time.
+        _refreshTimer = new Timer(OnRefreshTick, null, 500, 800);
         Logger.Debug("LCD refresh timer started");
     }
 
@@ -98,11 +107,27 @@ public sealed class LcdController : IDisposable
         }
     }
 
+    public void UpdateCameraStatus(CameraStatusPayload status)
+    {
+        lock (_stateLock)
+        {
+            _cameraConnected = status.Connected;
+            _cameraModel = NormalizeText(status.Model, "N/A");
+            _cameraBattery = NormalizeText(status.Battery, "--");
+            _cameraIso = NormalizeText(status.Iso, "--");
+            _cameraAperture = NormalizeText(status.Aperture, "--");
+            _cameraShutter = NormalizeText(status.ShutterSpeed, "--");
+        }
+    }
+
     public void Clear()
     {
         lock (_stateLock)
         {
-            _display.Clear();
+            lock (_displayLock)
+            {
+                _display.Clear();
+            }
         }
     }
 
@@ -118,7 +143,10 @@ public sealed class LcdController : IDisposable
                     using var image = new Image<Rgba32>(DisplayWidth, DisplayHeight);
                     var color = ImageSharpColor.FromRgb(r, g, b);
                     image.Mutate(ctx => ctx.Fill(color));
-                    _display.Write(image);
+                    lock (_displayLock)
+                    {
+                        _display.Write(image);
+                    }
                     Logger.Debug($"LCD test color written: RGB({r},{g},{b})");
                 }
             }
@@ -139,6 +167,9 @@ public sealed class LcdController : IDisposable
 
         private void OnRefreshTick(object? state)
         {
+            if (Interlocked.Exchange(ref _refreshInProgress, 1) == 1)
+                return;
+
             try
             {
                 if (_diagnosticMode)
@@ -166,7 +197,16 @@ public sealed class LcdController : IDisposable
                 bool motorsPaused;
                 float? targetRa;
                 float? targetDec;
-                string cameraName;
+                bool cameraConnected;
+                string cameraModel;
+                string cameraBattery;
+                string cameraIso;
+                string cameraAperture;
+                string cameraShutter;
+                bool isAligned;
+                string calibrationQuality;
+                double? calibrationResidualArcmin;
+                int alignmentPoints;
 
                 lock (_stateLock)
                 {
@@ -180,33 +220,163 @@ public sealed class LcdController : IDisposable
                     motorsPaused = _motorsPaused;
                     targetRa = Calibration.CurrentTargetRa;
                     targetDec = Calibration.CurrentTargetDec;
-                    cameraName = Calibration.SolveCamera?.cameramodel ?? "N/A";
+                    cameraConnected = _cameraConnected;
+                    cameraModel = _cameraModel;
+                    cameraBattery = _cameraBattery;
+                    cameraIso = _cameraIso;
+                    cameraAperture = _cameraAperture;
+                    cameraShutter = _cameraShutter;
+                    isAligned = Calibration.IsAligned;
+                    calibrationQuality = NormalizeText(Calibration.LastResult?.Quality, "N/A");
+                    calibrationResidualArcmin = Calibration.LastResult?.AverageResidualArcmin;
+                    alignmentPoints = Calibration.PointCount;
                 }
 
-                Logger.Debug($"LCD refresh: calibrated={Calibration.IsAligned}, motors={motorsEnabled}, pos=({posX},{posY},{posZ})");
-
                 using var image = new Image<Rgba32>(DisplayWidth, DisplayHeight);
-                image.Mutate(ctx => ctx.Fill(ImageSharpColor.Black));
+                var bg = ImageSharpColor.FromRgb(12, 14, 18);
+                var panel = ImageSharpColor.FromRgb(26, 30, 38);
+                var lineDim = ImageSharpColor.FromRgb(52, 58, 72);
+                var accent = ImageSharpColor.FromRgb(90, 200, 220);
+                var muted = ImageSharpColor.FromRgb(140, 148, 160);
+                var okColor = ImageSharpColor.FromRgb(120, 220, 140);
+                var warnColor = ImageSharpColor.FromRgb(235, 185, 70);
+                var badColor = ImageSharpColor.FromRgb(235, 95, 95);
+                var raColor = ImageSharpColor.FromRgb(130, 230, 255);
+                var decColor = ImageSharpColor.FromRgb(200, 185, 255);
+                var xColor = ImageSharpColor.FromRgb(255, 170, 170);
+                var yColor = ImageSharpColor.FromRgb(170, 255, 190);
+                var zColor = ImageSharpColor.FromRgb(170, 210, 255);
 
-                // Top banner
-                var bannerColor = Calibration.IsAligned
-                    ? ImageSharpColor.FromRgb(70, 170, 70)
-                    : ImageSharpColor.FromRgb(255, 255, 0);
-                image.Mutate(ctx => ctx.Fill(bannerColor, new Rectangle(0, 0, DisplayWidth, 30)));
-                
-                try { DrawCenteredText(image, Calibration.IsAligned ? "CALIBRATED" : "NOT CALIBRATED", _fontMed, ImageSharpColor.Black, 0, 0, DisplayWidth, 30); }
-                catch (Exception ex) { Logger.Debug($"Banner text failed: {ex.Message}"); }
+                var motorStateText = FormatMotorState(motorsEnabled, motorsPaused);
+                var motorStateColor = !motorsEnabled ? badColor : motorsPaused ? warnColor : okColor;
+                var calibrationStateColor = isAligned ? okColor : warnColor;
+                var calibrationScoreColor =
+                    calibrationQuality.Contains("EXCELLENT", StringComparison.OrdinalIgnoreCase) ? okColor :
+                    calibrationQuality.Contains("OK", StringComparison.OrdinalIgnoreCase) ? ImageSharpColor.FromRgb(170, 220, 255) :
+                    calibrationQuality.Contains("MARGINAL", StringComparison.OrdinalIgnoreCase) ? warnColor :
+                    calibrationQuality.Contains("REJECT", StringComparison.OrdinalIgnoreCase) ? badColor :
+                    ImageSharpColor.White;
 
-                // Dividers only - skip all other text for now
-                image.Mutate(ctx => ctx.Fill(ImageSharpColor.FromRgb(120, 120, 120), new Rectangle(10, 185, DisplayWidth - 20, 2)));
-                image.Mutate(ctx => ctx.Fill(ImageSharpColor.FromRgb(120, 120, 120), new Rectangle(260, 195, 2, 115)));
+                image.Mutate(ctx => ctx.Fill(bg));
 
-                _display.Write(image);
-                Logger.Debug("LCD refresh written");
+                const int topY = 6;
+                const int topH = 132;
+                const int topSplitX = 240;
+                const int targetBandY0 = 142;
+                const int targetBandY1 = 238;
+                const int calibY0 = 242;
+
+                image.Mutate(ctx => ctx.Fill(panel, new Rectangle(6, topY, topSplitX - 12, topH - 3)));
+                image.Mutate(ctx => ctx.Fill(panel, new Rectangle(topSplitX + 6, topY, DisplayWidth - topSplitX - 12, topH - 3)));
+                //image.Mutate(ctx => ctx.Fill(ImageSharpColor.FromRgb(18, 20, 26), new Rectangle(10, targetBandY0, DisplayWidth - 20, targetBandY1 - targetBandY0)));
+                image.Mutate(ctx => ctx.Fill(lineDim, new Rectangle(10, topY + topH + 2, DisplayWidth - 20, 2)));
+                image.Mutate(ctx => ctx.Fill(lineDim, new Rectangle(topSplitX-1, topY+3, 2, topH)));
+                image.Mutate(ctx => ctx.Fill(lineDim, new Rectangle(10, targetBandY1 + 2, DisplayWidth - 20, 2)));
+
+                float camX = 16;
+                float camPanelInnerRight = topSplitX - 8;
+                float mountX = topSplitX + 16;
+                float mountPanelInnerRight = DisplayWidth - 8;
+                float camLine = 18f;
+                float y = topY + 8;
+
+                DrawText(image, "CAMERA", _fontMed, accent, camX, y);
+                int? batteryPct = cameraConnected ? TryParseBatteryPercent(cameraBattery) : null;
+                string pctLabel = !cameraConnected ? "--"
+                    : batteryPct.HasValue ? $"{batteryPct.Value}%"
+                    : TrimToLength(cameraBattery, 8);
+                var pctOpts = new TextOptions(_fontSmall);
+                float pctW = TextMeasurer.MeasureSize(pctLabel, pctOpts).Width;
+                const int batBodyW = 18;
+                const int batNubW = 2;
+                const int batGap = 6;
+                int batGfxW = batBodyW + batNubW;
+                float batGroupW = batGfxW + batGap + pctW;
+                const float headerRightInset = 10f;
+                float batX = camPanelInnerRight - batGroupW - headerRightInset;
+                DrawBatteryGlyph(image, (int)batX, (int)y + 5, cameraConnected ? batteryPct : null, lineDim);
+                DrawText(image, pctLabel, _fontSmall, cameraConnected ? muted : ImageSharpColor.FromRgb(110, 115, 125), batX + batGfxW + batGap, y);
+                image.Mutate(ctx => ctx.Fill(accent, new Rectangle((int)camX, (int)(y + 22), (int)(camPanelInnerRight - camX - 8), 2)));
+                y += 28;
+                DrawText(image, cameraConnected ? "Connected" : "Disconnected", _fontSmall, cameraConnected ? okColor : badColor, camX, y);
+                y += camLine;
+                DrawText(image, TrimToLength(cameraModel, 26), _fontSmall, ImageSharpColor.White, camX, y);
+                y += camLine;
+                if (cameraConnected)
+                {
+                    DrawText(image, TrimToLength($"ISO {cameraIso}", 28), _fontSmall, ImageSharpColor.FromRgb(155, 210, 255), camX, y);
+                    y += camLine;
+                    DrawText(image, TrimToLength($"{cameraAperture}", 28), _fontSmall, ImageSharpColor.FromRgb(220, 195, 255), camX, y);
+                    y += camLine;
+                    DrawText(image, TrimToLength($"{cameraShutter}", 28), _fontSmall, ImageSharpColor.FromRgb(255, 205, 145), camX, y);
+                }
+                else
+                {
+                    DrawText(image, TrimToLength("ISO --", 28), _fontSmall, muted, camX, y);
+                    y += camLine;
+                    DrawText(image, TrimToLength("Aperture --", 28), _fontSmall, muted, camX, y);
+                    y += camLine;
+                    DrawText(image, TrimToLength("Shutter --", 28), _fontSmall, muted, camX, y);
+                }
+
+                y = topY + 8;
+                DrawText(image, "MOUNT", _fontMed, accent, mountX, y);
+                string tempLabel = $"{tempC:F1}C";
+                var tempOpts = new TextOptions(_fontSmall);
+                float tempW = TextMeasurer.MeasureSize(tempLabel, tempOpts).Width;
+                const int thermBulb = 8;
+                const int thermGap = 6;
+                int thermGfxW = thermBulb;
+                float thermGroupW = thermGfxW + thermGap + tempW;
+                float thermX = mountPanelInnerRight - thermGroupW - headerRightInset;
+                DrawThermometerGlyph(image, (int)thermX, (int)y + 2, tempC, lineDim);
+                DrawText(image, tempLabel, _fontSmall, muted, thermX + thermGfxW + thermGap, y);
+                image.Mutate(ctx => ctx.Fill(accent, new Rectangle((int)mountX, (int)(y + 22), (int)(mountPanelInnerRight - mountX - 8), 2)));
+                y += 28;
+                DrawText(image, $"Motors {motorStateText}", _fontSmall, motorStateColor, mountX, y);
+                y += camLine;
+                const float axisLine = 18f;
+                DrawText(image, $"X {posX:F0}", _fontMountAxis, xColor, mountX, y);
+                y += axisLine;
+                DrawText(image, $"Y {posY:F0}", _fontMountAxis, yColor, mountX, y);
+                y += axisLine;
+                DrawText(image, $"Z {posZ:F0}", _fontMountAxis, zColor, mountX, y);
+                y += camLine;
+                DrawText(image, TrimToLength($"{connectionType}  {ipAddress}", 32), _fontSmall, muted, mountX, y);
+
+                DrawCenteredText(image, "TARGET", _fontMed, accent, 0, targetBandY0 + 4, DisplayWidth, 20);
+                try
+                {
+                    const int targetLineH = 34;
+                    DrawCenteredText(image, FormatRa(targetRa), _fontTarget, raColor, 0, targetBandY0 + 24, DisplayWidth, targetLineH);
+                    DrawCenteredText(image, FormatDec(targetDec), _fontTarget, decColor, 0, targetBandY0 + 58, DisplayWidth, targetLineH);
+                }
+                catch (Exception ex) { Logger.Debug($"Target text layout: {ex.Message}"); }
+
+                float calibLeftX = 16;
+                float calibRightX = 252;
+                float cy = calibY0 + 4;
+                const float calibRow = 15f;
+                DrawText(image, "CALIBRATION", _fontMed, accent, calibLeftX, cy);
+                cy += 22;
+                DrawText(image, $"Status: {(isAligned ? "Calibrated" : "Not calibrated")}", _fontSmall, calibrationStateColor, calibLeftX, cy);
+                DrawText(image, $"Score: {TrimToLength(calibrationQuality, 22)}", _fontSmall, calibrationScoreColor, calibRightX, cy);
+                cy += calibRow;
+                DrawText(image, $"Error: {FormatError(calibrationResidualArcmin)}", _fontSmall, ImageSharpColor.White, calibLeftX, cy);
+                DrawText(image, $"Points: {alignmentPoints}", _fontSmall, ImageSharpColor.White, calibRightX, cy);
+
+                lock (_displayLock)
+                {
+                    _display.Write(image);
+                }
             }
             catch (Exception ex)
             {
                 Logger.Debug($"LCD refresh failed: {ex}");
+            }
+            finally
+            {
+                Volatile.Write(ref _refreshInProgress, 0);
             }
         }
 
@@ -216,6 +386,111 @@ public sealed class LcdController : IDisposable
         float textX = x + (width - size.Width) / 2f;
         float textY = y + (height - size.Height) / 2f - 2f;
         image.Mutate(ctx => ctx.DrawText(text, font, color, new PointF(textX, textY)));
+    }
+
+    private static void DrawText(Image<Rgba32> image, string text, SixLaborsFont font, ImageSharpColor color, float x, float y)
+    {
+        image.Mutate(ctx => ctx.DrawText(text, font, color, new PointF(x, y)));
+    }
+
+    /// <summary>Small battery pictogram (body + nub); fill reflects 0–100% when known.</summary>
+    private static void DrawBatteryGlyph(Image<Rgba32> image, int x, int y, int? percent, ImageSharpColor frameColor)
+    {
+        const int bodyW = 18;
+        const int nubW = 2;
+        const int h = 10;
+        var innerBg = ImageSharpColor.FromRgb(28, 31, 38);
+        image.Mutate(ctx =>
+        {
+            ctx.Fill(frameColor, new Rectangle(x, y, bodyW, h));
+            ctx.Fill(frameColor, new Rectangle(x + bodyW, y + 2, nubW, h - 4));
+            ctx.Fill(innerBg, new Rectangle(x + 1, y + 1, bodyW - 2, h - 2));
+            if (!percent.HasValue)
+                return;
+            int p = Math.Clamp(percent.Value, 0, 100);
+            int innerMax = bodyW - 4;
+            int fw = p <= 0 ? 0 : Math.Max(1, (innerMax * p + 50) / 100);
+            if (fw <= 0)
+                return;
+            ImageSharpColor fill = p <= 10 ? ImageSharpColor.FromRgb(220, 75, 75)
+                : p <= 25 ? ImageSharpColor.FromRgb(235, 175, 55)
+                : ImageSharpColor.FromRgb(75, 185, 115);
+            ctx.Fill(fill, new Rectangle(x + 2, y + 2, Math.Min(fw, innerMax), h - 4));
+        });
+    }
+
+    /// <summary>Small thermometer pictogram with mercury fill mapped to mount temperature.</summary>
+    private static void DrawThermometerGlyph(Image<Rgba32> image, int x, int y, float tempC, ImageSharpColor frameColor)
+    {
+        const int bodyW = 6;
+        const int bodyH = 12;
+        const int bulb = 8;
+        var innerBg = ImageSharpColor.FromRgb(28, 31, 38);
+        int bodyX = x + 1;
+        int bodyY = y;
+        int bulbX = x;
+        int bulbY = y + bodyH - 2;
+        float norm = Math.Clamp((tempC + 10f) / 60f, 0f, 1f); // -10C..50C display range
+        int fillH = (int)MathF.Round((bodyH - 2) * norm);
+        ImageSharpColor mercury = tempC >= 35f ? ImageSharpColor.FromRgb(220, 75, 75)
+            : tempC >= 20f ? ImageSharpColor.FromRgb(235, 175, 55)
+            : ImageSharpColor.FromRgb(75, 170, 235);
+
+        image.Mutate(ctx =>
+        {
+            ctx.Fill(frameColor, new Rectangle(bodyX, bodyY, bodyW, bodyH));
+            ctx.Fill(frameColor, new Rectangle(bulbX, bulbY, bulb, bulb));
+            ctx.Fill(innerBg, new Rectangle(bodyX + 1, bodyY + 1, bodyW - 2, bodyH - 2));
+            ctx.Fill(innerBg, new Rectangle(bulbX + 1, bulbY + 1, bulb - 2, bulb - 2));
+            if (fillH > 0)
+                ctx.Fill(mercury, new Rectangle(bodyX + 2, bodyY + bodyH - 1 - fillH, bodyW - 4, fillH));
+            ctx.Fill(mercury, new Rectangle(bulbX + 2, bulbY + 2, bulb - 4, bulb - 4));
+        });
+    }
+
+    private static int? TryParseBatteryPercent(string? battery)
+    {
+        if (string.IsNullOrWhiteSpace(battery) || battery == "--")
+            return null;
+        ReadOnlySpan<char> s = battery.AsSpan().Trim();
+        int i = s.IndexOf('%');
+        if (i > 0)
+        {
+            int j = i - 1;
+            while (j >= 0 && char.IsDigit(s[j])) j--;
+            ReadOnlySpan<char> digits = s.Slice(j + 1, i - j - 1);
+            if (digits.Length > 0 && int.TryParse(digits, out int v))
+                return Math.Clamp(v, 0, 100);
+        }
+        if (s.Contains("Full", StringComparison.OrdinalIgnoreCase))
+            return 100;
+        if (s.Contains("Empty", StringComparison.OrdinalIgnoreCase) || s.Contains("Critical", StringComparison.OrdinalIgnoreCase))
+            return 0;
+        if (s.Contains("Low", StringComparison.OrdinalIgnoreCase))
+            return 20;
+        return null;
+    }
+
+    private static string NormalizeText(string? value, string fallback)
+    {
+        return string.IsNullOrWhiteSpace(value) ? fallback : value;
+    }
+
+    private static string TrimToLength(string text, int maxLength)
+    {
+        if (text.Length <= maxLength) return text;
+        return text[..(maxLength - 3)] + "...";
+    }
+
+    private static string FormatMotorState(bool motorsEnabled, bool motorsPaused)
+    {
+        if (!motorsEnabled) return "OFF";
+        return motorsPaused ? "PAUSED" : "ON";
+    }
+
+    private static string FormatError(double? errorArcmin)
+    {
+        return errorArcmin.HasValue ? $"{errorArcmin.Value:F2}'" : "--";
     }
 
     private static string FormatRa(float? ra) => ra.HasValue ? $"{ra.Value:F3}h" : "--";
@@ -272,6 +547,9 @@ public sealed class LcdController : IDisposable
         private readonly int _width;
         private readonly int _height;
         private readonly byte[] _pixelBuffer;
+        private readonly bool _mirrorX = false;
+        private readonly bool _swapRedBlue = false;
+        private readonly bool _invertColors = false;
 
         public Hx8357Display(int width, int height)
         {
@@ -344,8 +622,26 @@ public sealed class LcdController : IDisposable
                     var row = accessor.GetRowSpan(y);
                     for (int x = 0; x < _width; x++)
                     {
-                        var pixel = row[x];
-                        ushort color = Rgb565(pixel.R, pixel.G, pixel.B);
+                        int sourceX = _mirrorX ? (_width - 1 - x) : x;
+                        var pixel = row[sourceX];
+
+                        byte r = pixel.R;
+                        byte g = pixel.G;
+                        byte b = pixel.B;
+
+                        if (_swapRedBlue)
+                        {
+                            (r, b) = (b, r);
+                        }
+
+                        if (_invertColors)
+                        {
+                            r = (byte)(255 - r);
+                            g = (byte)(255 - g);
+                            b = (byte)(255 - b);
+                        }
+
+                        ushort color = Rgb565(r, g, b);
                         _pixelBuffer[offset++] = (byte)(color >> 8);
                         _pixelBuffer[offset++] = (byte)(color & 0xFF);
                     }
