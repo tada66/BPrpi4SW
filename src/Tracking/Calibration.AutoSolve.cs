@@ -65,13 +65,7 @@ public static partial class Calibration
         }
 
         // Wait for the Pico's initial slew to complete.
-        // StartTrackingAsync sends CMD_TRACK_CELESTIAL which makes the Pico slew to the
-        // predicted sky position and then engage sidereal tracking.  We CANNOT use
-        // WaitForMoveCompleteAsync here — that polls until motor positions stop changing,
-        // but during celestial tracking the motors move continuously at sidereal rate
-        // (~15"/s on X) and NEVER stop.  On 2026-03-11 this caused AutoCenter to hang
-        // forever at this point, blocking all guided tracking corrections.
-        // Instead, wait for the Pico to report celestialTracking==true (end of initial slew).
+
         await Tracker.WaitForCelestialTrackingAsync(15000, ct);
 
         double lastErrorPx = double.MaxValue;
@@ -148,10 +142,6 @@ public static partial class Calibration
                 }
 
                 Logger.Notice($"AutoCenter: correcting — ΔAlt={dDecDeg * 3600:F0}\", ΔAz={dRaDeg * 3600:F0}\"");
-                // Note: MoveRelative already stops celestial tracking on the Pico internally
-                // (stepper_queue_static_move sets celestial_state.active = false).
-                // DO NOT call StopAll() here — it sends CMD_STOP which disables the motors
-                // entirely, losing the position reference and invalidating calibration.
                 await Task.Delay(200, ct);
 
                 var targetAltAz = ComputeAltAz(targetRA, targetDec, DateTime.UtcNow, Latitude, Longitude);
@@ -173,12 +163,6 @@ public static partial class Calibration
                 await WaitForMoveCompleteAsync(maxCorr, ct);
 
                 await StartTrackingAsync(targetRA, targetDec);
-                // Wait until the Pico's initial slew (after CMD_TRACK_CELESTIAL) finishes
-                // and the mount reports TRACKING — then add 2.5s stabilisation.
-                // Task.Delay(2000) was not enough: during the test on 2026-03-11 the mount
-                // was still INACTIVE at 2 s and only reached TRACKING 1 s later, causing
-                // the iteration-2 exposure to begin mid-slew and produce a blurred image that
-                // astrometry.net instantly rejected (exit code 255).
                 await Tracker.WaitForCelestialTrackingAsync(15000, ct);
 
                 TryDeleteFile(imagePath);
