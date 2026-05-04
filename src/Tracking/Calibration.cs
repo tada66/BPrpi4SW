@@ -1426,7 +1426,6 @@ public static partial class Calibration
             targetDec,
             trackingMatrix,
             refTime,
-            (float)Latitude,
             (int)_mountXOffsetArcsec,
             (int)_mountZOffsetArcsec
         );
